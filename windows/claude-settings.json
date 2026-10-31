@@ -1,0 +1,26 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/statusline.ps1"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" } ] }
+    ]
+  }
+}

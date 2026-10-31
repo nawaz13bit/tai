@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "userPromptSubmitted": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 userPromptSubmitted" }],
+    "preToolUse": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 PreToolUse" }],
+    "permissionRequest": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 PermissionRequest" }],
+    "notification": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 Notification" }],
+    "agentStop": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 agentStop" }],
+    "sessionEnd": [{ "type": "command", "powershell": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1 SessionEnd" }]
+  }
+}

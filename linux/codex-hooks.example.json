@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh", "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh", "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh", "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh", "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }] }]
+  }
+}

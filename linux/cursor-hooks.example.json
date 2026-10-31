@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{ "command": "/path/to/terminal_ai/linux/hook.sh" }],
+    "preToolUse": [{ "command": "/path/to/terminal_ai/linux/hook.sh" }],
+    "stop": [{ "command": "/path/to/terminal_ai/linux/hook.sh" }],
+    "sessionEnd": [{ "command": "/path/to/terminal_ai/linux/hook.sh" }]
+  }
+}

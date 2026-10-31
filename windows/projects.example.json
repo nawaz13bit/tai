@@ -1,0 +1,4 @@
+[
+    { "name": "my-app", "path": "C:\\Users\\you\\code\\my-app", "agent": "claude" },
+    { "name": "my-lib", "path": "C:\\Users\\you\\code\\my-lib", "agent": "codex" }
+]

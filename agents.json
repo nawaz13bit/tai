@@ -1,0 +1,35 @@
+{
+  "claude": {
+    "exe": "claude",
+    "resume": ["--continue", "--remote-control", "{name}"],
+    "fresh": ["--remote-control", "{name}"],
+    "settingsFlag": "--settings"
+  },
+  "codex": {
+    "exe": "codex",
+    "args": ["--no-alt-screen"],
+    "resume": ["resume", "--last"]
+  },
+  "agy": {
+    "exe": "agy",
+    "resume": ["--continue"]
+  },
+  "opencode": {
+    "exe": "opencode",
+    "resume": ["--continue"],
+    "env": { "OPENCODE_DISABLE_TERMINAL_TITLE": "1" }
+  },
+  "cursor": {
+    "exe": "agent",
+    "resume": ["--continue"]
+  },
+  "copilot": {
+    "exe": "copilot",
+    "args": ["--no-alt-screen"],
+    "resume": ["--continue"]
+  },
+  "qwen": {
+    "exe": "qwen",
+    "resume": ["--continue"]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "userPromptSubmitted": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh userPromptSubmitted" }],
+    "preToolUse": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh PreToolUse" }],
+    "permissionRequest": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh PermissionRequest" }],
+    "notification": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh Notification" }],
+    "agentStop": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh agentStop" }],
+    "sessionEnd": [{ "type": "command", "bash": "/path/to/terminal_ai/linux/hook.sh SessionEnd" }]
+  }
+}

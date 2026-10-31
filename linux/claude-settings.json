@@ -1,0 +1,26 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/path/to/terminal_ai/linux/statusline.sh"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "/path/to/terminal_ai/linux/hook.sh" } ] }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+# Personal config (project list with local paths)
+projects.json
+
+# Runtime data
+state/
+usage.json
+*.log
+*.alive
+*.cache.json
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/

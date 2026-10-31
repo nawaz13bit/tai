@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{ "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }],
+    "preToolUse": [{ "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }],
+    "stop": [{ "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }],
+    "sessionEnd": [{ "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/hook.ps1" }]
+  }
+}

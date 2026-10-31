@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/path/to/terminal_ai/windows/agy-statusline.ps1"
+  },
+  "altScreenMode": "never"
+}

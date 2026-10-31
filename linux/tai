@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Starts (or re-attaches to) the tai tmux session: dashboard on the left, one pane per open project.
+# Usage: tai [--dry-run]
+#        tai add [--name <name>] <path> [<path> ...] | tai remove <name> | tai list
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+for tool in tmux jq; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "tai needs '$tool' (e.g. sudo apt install $tool)" >&2; exit 1; }
+done
+
+case "${1:-}" in
+    list)
+        ensure_projects
+        list_projects | column -t -s $'\t'
+        exit 0 ;;
+    add)
+        shift; name=""
+        [[ "${1:-}" == "--name" ]] && { name="${2:-}"; shift 2; }
+        (($#)) || { echo "Usage: tai add [--name <name>] <path> [<path> ...]" >&2; exit 1; }
+        [[ -n "$name" && $# -gt 1 ]] && { echo "--name only works with a single path." >&2; exit 1; }
+        ensure_projects
+        for arg in "$@"; do
+            dir="$(cd "$arg" 2>/dev/null && pwd)" || { echo "Not a folder: $arg" >&2; exit 1; }
+            add_project "$dir" "$name" || { echo "$MSG" >&2; exit 1; }
+            echo "Added ${name:-$(basename "$dir")} -> $dir"
+        done
+        exit 0 ;;
+    remove)
+        [[ -n "${2:-}" ]] || { echo "Usage: tai remove <name>" >&2; exit 1; }
+        ensure_projects
+        path="$(jq -r --arg n "$2" "$JQ_DEFS"' .[] | select(.name == $n and vis) | lp' "$PROJECTS" | head -n1)"
+        [[ -n "$path" ]] || { echo "No project named '$2'." >&2; exit 1; }
+        remove_project "$path"
+        echo "Removed $2"
+        exit 0 ;;
+esac
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    echo "tmux new-session -d -s $SESSION $TAI_DIR/dashboard.sh   # then attach"
+    exit 0
+fi
+
+attach() { if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "$SESSION"; else exec tmux attach -t "$SESSION"; fi; }
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then attach; fi
+
+ensure_projects
+cols="$(tput cols 2>/dev/null || echo 200)"; rows="$(tput lines 2>/dev/null || echo 50)"
+tmux new-session -d -s "$SESSION" -n tai -x "$cols" -y "$rows" "$TAI_DIR/dashboard.sh"
+tmux set-option -p -t "$SESSION:0.0" @tai_role dashboard
+tmux set-option -t "$SESSION" mouse on
+tmux set-option -t "$SESSION" status off
+tmux set-option -t "$SESSION" pane-border-status top
+tmux set-option -t "$SESSION" pane-border-format ' #{?@tai_path,#{@tai_name},tai} '
+# Neon Retro: blue frames, neon-green for the focused pane.
+tmux set-option -t "$SESSION" pane-border-style 'fg=#1F4FC8'
+tmux set-option -t "$SESSION" pane-active-border-style 'fg=#39FF14,bold'
+tmux set-option -t "$SESSION" remain-on-exit off
+attach

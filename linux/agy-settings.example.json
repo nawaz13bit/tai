@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/path/to/terminal_ai/linux/agy-statusline.sh"
+  },
+  "altScreenMode": "never"
+}
