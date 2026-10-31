@@ -24,7 +24,7 @@ Tick each box; note anything odd next to it.
 - [x] `A` with a non-existent path offers to create the folder (y/N), then lists it.
 - [x] Exit the CLI inside a pane (`/exit`): menu shows Restart / Switch / Close project.
 - [x] Switch to another CLI: it relaunches in the same pane and the choice is saved.
-- [x] Esc or idle on the menu leaves the pane empty (was 15 s, now 5 s; see section 3c).
+- [x] Esc or idle on the menu leaves the pane empty (idle timeout is 5 s; see section 3c).
 - [x] (Only if codex/agy installed; Codex data and agy quotas confirmed live 2026-10-30) apply `agy-settings.example.json` / `codex-hooks.example.json`, check model/ctx/quota rows.
 
 ## 3. Fixes to confirm
@@ -33,9 +33,9 @@ Tick each box; note anything odd next to it.
 - [x] Resize/scroll bug: resize slot 1, then try mouse wheel and Shift+PgUp/PgDn.
   - If still broken, set `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in `slot.ps1` and retest.
   - Workaround meanwhile: Ctrl+O then `[`.
-- [x] Idle sessions keep model/effort/ctx fresh in the dashboard. If stale, add `"refreshInterval": 10` to the `statusLine` block in `claude-settings.json`, restart the panes, retest.
+- [x] Idle sessions keep model/effort/ctx fresh in the dashboard. (`refreshInterval` was never needed or applied.)
 
-## 3b. Added 2026-10-21 (parse-checked + unit-tested, not seen live; restart tai first)
+## 3b. Added 2026-10-21 (all confirmed live; restart tai first)
 - [x] Pane limit by monitor size: `state\cells.json` holds the monitor's [columns, rows] (208x72 on this 1080p at font 8) and tai stops at 4 panes (min pane 55x24 cells), even after you resize panes by hand. Dashboard says "Window fits only N panes" when full.
 - [x] (`G` cycles only installed CLIs, confirmed live 2026-10-30; the startup message itself was too brief to read) Dashboard starts with "CLIs found: claude" (only installed CLIs); chooser is skipped with one CLI, `G` only cycles installed ones.
 - [x] `/exit` in a pane when 2+ panes are open: press Esc, or wait 5 s, or pick "Close project (and pane)": the pane closes.
@@ -43,7 +43,7 @@ Tick each box; note anything odd next to it.
 - [x] `/exit` in the last remaining pane: it stays open and empty (not closed).
 - [x] Restart and Switch in that menu still work.
 
-## 3c. Added 2026-10-21 (parse-checked + unit-tested, not seen live; restart tai first)
+## 3c. Added 2026-10-21 (all confirmed live; restart tai first)
 - [x] Session restore: open 2-3 projects, close the whole window, run `tai`: the same projects reopen one by one (about 2.5 s apart), each resuming its last conversation; the dashboard says "Reopening N project(s)".
 - [x] After the restore, focus lands on the dashboard and the restored panes stay open beside it.
 - [x] A project closed with X before closing the window is not reopened. Closing every project with X, then restarting, reopens nothing.
@@ -56,4 +56,13 @@ Tick each box; note anything odd next to it.
 - [x] Claude sends effort to the status line.
 - [x] Per-pane status line looks right: `[folder] ctx N% | compact in ~N%`.
 - [ ] 5+ panes in a very large window; unequal pane sizes. (This monitor stops at 4 panes, so 5+ can't be tested here. Defer to a bigger display.)
-- [ ] Closing the 4th pane (4 to 3 panes): the old 3-pane reshape (tab move + `move-pane`, no direction flag possible) turned it into 3 columns; it is gone from `lib.ps1` now, so wt's own shape should stay (stacked pair on one side, tall pane on the other). Re-test after a tai restart.
+- [ ] Closing the 4th pane (4 to 3 panes): wt cannot re-split running panes, so `Optimize-Layout` only fixes 2 stacked panes and 3/4 keep wt's own shape. Re-test after a tai restart; reopening tai lays out 3/4 correctly via `Get-NextSplit`.
+- [ ] Wrapper pid killed from outside: Claude is left orphaned in the pane while the dashboard shows the project closed (unfixed, see section 1).
+
+## 5. Built 2026-10-31, not yet seen live (restart tai first)
+- [ ] `P` on a scratch repo with changes: asks for a message, commits, pushes the branch, offers `gh pr create --fill` when `gh` is installed. Commit message has no BOM (`git log -1 --format=%B | xxd | head`).
+- [ ] `P` on a repo with nothing to commit, and on a folder that is not a repo: clear message, nothing breaks.
+- [ ] `V` toggles the preview under the list; with a Claude session selected it shows the last reply (wrapped, up to 4 rows). Other CLIs show "claude only"; a closed project shows "not open".
+- [ ] `V` state survives a dashboard restart (flag `preview.on`).
+- [ ] `/` find: type part of a project name, the cursor jumps to the match, nothing is hidden, and M/reorder/save still use the full list.
+- [ ] `T` toast toggle and `F` diff / `W` worktree were confirmed live 2026-10-30; no re-test needed.

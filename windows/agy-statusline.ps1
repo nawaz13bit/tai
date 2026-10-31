@@ -1,8 +1,9 @@
 # Antigravity (agy) status line: records model, context, quota and activity for the dashboard.
 # Register it in ~/.gemini/antigravity-cli/settings.json (see agy-settings.example.json).
 # Only panes started by tai (TAI_PROJECT_DIR set) are recorded; elsewhere it just prints the line.
-$raw = [Console]::In.ReadToEnd()
+$raw = (New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false))).ReadToEnd()   # UTF-8, not the OEM code page, so non-ASCII paths keep their state key
 if ([string]::IsNullOrWhiteSpace($raw)) { return }
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }   # printed line as UTF-8 too
 try { $data = $raw | ConvertFrom-Json } catch { return }
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
@@ -43,9 +44,9 @@ if ($dir) {
         updated    = (Get-Date).ToString('o')
     } | ConvertTo-Json
     try {
-        Set-Content "$file.tmp" $json -Encoding utf8 -ErrorAction Stop
-        Move-Item "$file.tmp" $file -Force
-    } catch { }
+        Set-Content "$file.$PID.tmp" $json -Encoding utf8 -ErrorAction Stop
+        Move-Item "$file.$PID.tmp" $file -Force
+    } catch { Remove-Item "$file.$PID.tmp" -Force -ErrorAction SilentlyContinue }
 }
 
 $project = if ($dir) { Split-Path $dir.TrimEnd('/', '\') -Leaf } else { $null }

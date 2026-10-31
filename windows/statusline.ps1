@@ -1,14 +1,15 @@
 # Per-pane status line: model, context usage, auto-compaction. Also records
 # account rate limits to usage.json so the global usage pane can show them.
-$raw = [Console]::In.ReadToEnd()
+$raw = (New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false))).ReadToEnd()   # UTF-8, not the OEM code page, so non-ASCII paths keep their state key
 if ([string]::IsNullOrWhiteSpace($raw)) { return }
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }   # printed line as UTF-8 too
 try { $data = $raw | ConvertFrom-Json } catch { return }
 
 # Write via a temp file so the dashboard never reads a half-written file.
 function Write-Atomic($path, $json) {
-    $tmp = "$path.tmp"
-    Set-Content $tmp $json -Encoding utf8
-    Move-Item $tmp $path -Force
+    $tmp = "$path.$PID.tmp"   # per-process name: several panes write the shared usage.json at once
+    try { Set-Content $tmp $json -Encoding utf8; Move-Item $tmp $path -Force }
+    catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 }
 
 $model = $data.model.display_name

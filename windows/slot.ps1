@@ -9,7 +9,18 @@ $assign = Join-Path $stateDir "slot$Slot.assign"
 $running = Join-Path $stateDir "slot$Slot.json"
 $closeFlag = Join-Path $stateDir "slot$Slot.close"
 $exitFlag = Join-Path $stateDir "slot$Slot.exit"
+# claude-settings.example.json is the tracked template (placeholder C:/path/to/terminal_ai). claude-settings.json is the
+# copy in use (git-ignored): it is created from the template with this checkout's real folder the first time a pane
+# starts, and then left alone so it can be edited by hand.
 $settings = Join-Path $PSScriptRoot 'claude-settings.json'
+if (-not (Test-Path -LiteralPath $settings)) {
+    try {
+        $repoRoot = (Split-Path $PSScriptRoot -Parent) -replace '\\', '/'
+        $template = Join-Path $PSScriptRoot 'claude-settings.example.json'
+        $text = [IO.File]::ReadAllText($template, [Text.Encoding]::UTF8).Replace('C:/path/to/terminal_ai', $repoRoot)
+        [IO.File]::WriteAllText($settings, $text, (New-Object Text.UTF8Encoding $false))
+    } catch { }
+}
 
 # Heartbeat: lets the dashboard notice when this pane's window is closed and drop it from the layout.
 [pscustomobject]@{ slot = $Slot; pid = $PID; since = (Get-Date).ToString('o') } |
@@ -52,7 +63,14 @@ while ($true) {
             ConvertTo-Json | Set-Content $running -Encoding utf8
     }
     Remove-Item $closeFlag -Force -ErrorAction SilentlyContinue
-    Push-Location $job.path
+    # A missing folder must not start the CLI in tai's own directory; [ ] in a path are not wildcards.
+    if (-not (Test-Path -LiteralPath $job.path -PathType Container)) {
+        Write-Host "Folder not found: $($job.path)" -ForegroundColor Red
+        Remove-Item $running -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 4
+        continue
+    }
+    Push-Location -LiteralPath $job.path
     $env:TAI_PROJECT_DIR = $job.path
     $env:TAI_AGENT = $agent
     # Claude would retitle the window; the dashboard finds the focused pane by its "pane N" title.
@@ -122,7 +140,7 @@ while ($true) {
                 if ($key.Key -eq 'UpArrow') { $idx = ($idx - 1 + $choices.Count) % $choices.Count }
                 elseif ($key.Key -eq 'DownArrow') { $idx = ($idx + 1) % $choices.Count }
                 elseif ($key.Key -eq 'Enter') { $pick = $idx }
-                elseif ($key.KeyChar -ge '1' -and [int][string]$key.KeyChar -le $choices.Count) { $pick = [int][string]$key.KeyChar - 1 }
+                elseif ([string]$key.KeyChar -match '^[1-9]$' -and [int][string]$key.KeyChar -le $choices.Count) { $pick = [int][string]$key.KeyChar - 1 }
                 else { $pick = -1 }
             }
             if ($pick -lt 0 -or $pick -eq $choices.Count - 1) {

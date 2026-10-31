@@ -1,0 +1,11 @@
+﻿{
+    "updated":  "2026-10-31T11:50:45.0989010-07:00",
+    "five_hour":  {
+                      "used_percentage":  38,
+                      "resets_at":  1793485200
+                  },
+    "seven_day":  {
+                      "used_percentage":  23,
+                      "resets_at":  1793973600
+                  }
+}

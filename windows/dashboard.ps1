@@ -5,6 +5,7 @@
 $stateDir = Join-Path $PSScriptRoot 'state'
 $usageFile = Join-Path $PSScriptRoot 'usage.json'
 $alive = Join-Path $stateDir 'dashboard.alive'
+Remove-Item (Join-Path $stateDir 'dashboard.launching') -Force -ErrorAction SilentlyContinue   # tai.ps1's start-up marker
 $maxSlots = 9
 # Icons built from code points so the script stays plain ASCII (PS 5.1 misreads UTF-8 without a BOM).
 $icon = @{
@@ -67,7 +68,21 @@ function Get-CodexUsage {
     $script:codexStamp = Get-Date
     try {
         $root = Join-Path $env:USERPROFILE '.codex\sessions'
-        $files = @(Get-ChildItem $root -Recurse -Filter 'rollout-*.jsonl' -ErrorAction Stop | Sort-Object LastWriteTime -Descending | Select-Object -First 20)
+        # Logs sit in YYYY\MM\DD folders; look at the newest day folders only (up to 7, stopping at 20 files) so years of
+        # history are not listed on every refresh. Falls back to the full scan when the layout is not as expected.
+        $cand = @()
+        $days = 0
+        :scan foreach ($y in @(Get-ChildItem $root -Directory -ErrorAction Stop | Where-Object { $_.Name -match '^\d{4}$' } | Sort-Object Name -Descending)) {
+            foreach ($mo in @(Get-ChildItem $y.FullName -Directory | Sort-Object Name -Descending)) {
+                foreach ($d in @(Get-ChildItem $mo.FullName -Directory | Sort-Object Name -Descending)) {
+                    $cand += @(Get-ChildItem $d.FullName -Filter 'rollout-*.jsonl' -File)
+                    $days++
+                    if ($days -ge 7 -or $cand.Count -ge 20) { break scan }
+                }
+            }
+        }
+        if (-not $cand.Count) { $cand = @(Get-ChildItem $root -Recurse -Filter 'rollout-*.jsonl' -ErrorAction Stop) }
+        $files = @($cand | Sort-Object LastWriteTime -Descending | Select-Object -First 20)
         $byDir = @{}
         $gotLimits = $false
         $script:codexUsage = $null
@@ -132,7 +147,7 @@ function Get-GitInfo($path, [switch]$Cached) {
         $count = 0
         foreach ($l in (git -C $path worktree list --porcelain 2>$null)) { if ($l -like 'worktree *') { $count++ } }
         $changed = 0; $new = 0
-        foreach ($l in (git -C $path status --porcelain 2>$null)) { if ($l.StartsWith('??')) { $new++ } else { $changed++ } }
+        foreach ($l in (git --no-optional-locks -C $path status --porcelain 2>$null)) { if ($l.StartsWith('??')) { $new++ } else { $changed++ } }
         # Commits not yet pushed / not yet pulled, against the upstream branch (null when none is set).
         $ahead = $null; $behind = $null
         $lr = [string](git -C $path rev-list --left-right --count '@{u}...HEAD' 2>$null)
@@ -158,6 +173,13 @@ function Get-GhStats($path, [switch]$NoStart) {
     $key = Get-NormPath $path
     $c = $ghCache[$key]
     if (-not $c) { $c = @{ time = [datetime]::MinValue; text = $null; job = $null }; $ghCache[$key] = $c }
+    # A lookup stuck for over a minute (network, auth prompt) would block every other project's lookup: drop it, keep the old text.
+    if ($c.job -and $c.job.State -eq 'Running' -and ((Get-Date) - $c.time).TotalSeconds -gt 60) {
+        Stop-Job $c.job -ErrorAction SilentlyContinue
+        Remove-Job $c.job -Force -ErrorAction SilentlyContinue
+        $c.job = $null
+        $c.time = Get-Date
+    }
     if ($c.job -and $c.job.State -ne 'Running') {
         $out = @(Receive-Job $c.job -ErrorAction SilentlyContinue)
         Remove-Job $c.job -Force
@@ -225,7 +247,11 @@ function Get-Slots {
         try {
             $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
             # Pane window closed without exiting Claude: its file is stale. (Files from older panes have no pid.)
-            if ($s.pid -and -not (Test-SlotAlive $s.pid $s.since)) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; continue }
+            if ($s.pid -and -not (Test-SlotAlive $s.pid $s.since)) {
+                # The wrapper is gone; if it was killed from outside, its CLI is still running in the pane. Stop it.
+                [void](Stop-OrphanedSlotChildren $s.pid $s.since)
+                Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; continue
+            }
             $slots[(Get-NormPath $s.path)] = $s
         } catch { continue }
     }
@@ -384,6 +410,17 @@ function Open-Project($project, $slots, $batch = $null) {
     if ($slots.ContainsKey($key)) { if ($null -ne $batch) { return "$($project.name) already open" }; Focus-Slot ([int]$slots[$key].slot); return "$($project.name) -> pane $($slots[$key].slot)" }
     if (-not (Test-Path $project.path)) { return "Folder missing: $($project.path)" }
     $taken = @($slots.Values | ForEach-Object { [int]$_.slot })
+    # The only pane was closed by hand: split a new first pane off the dashboard.
+    if (Test-NoPanes) {
+        $first = [int](Get-Content (Join-Path $stateDir 'nopanes') -Raw -ErrorAction SilentlyContinue)
+        if ($first -lt 1) { $first = 1 }
+        $assignFile = Join-Path $stateDir "slot$first.assign"
+        [pscustomobject]@{ name = $project.name; path = $project.path; agent = (Get-Agent $project) } |
+            ConvertTo-Json | Set-Content "$assignFile.tmp" -Encoding utf8
+        Move-Item "$assignFile.tmp" $assignFile -Force
+        New-FirstPane $first $batch
+        return "Opening $($project.name) in pane $first"
+    }
     $paneCount = Get-PaneCount
     # Slot numbers can have gaps once panes were closed, so take them from the layout.
     $layout = @(Get-Layout $paneCount)
@@ -460,6 +497,136 @@ function Move-ProjectOrder($projects, $cursor, $delta) {
     return $true
 }
 
+# P: commit everything, push the branch and optionally open a PR (gh pr create --fill). Runs in the dashboard pane.
+function Publish-Project($p) {
+    $env:GIT_TERMINAL_PROMPT = '0'   # a missing credential fails fast instead of hanging the dashboard
+    $path = $p.path
+    # Capture first, then read the exit code: `| Select-Object -First 1` ends the pipeline early, so $LASTEXITCODE could
+    # still hold a failure from an earlier git call (e.g. the dashboard's upstream lookup) and fake a "not a repo".
+    $head = @(& git -C $path rev-parse --abbrev-ref HEAD 2>&1)
+    if ($LASTEXITCODE -ne 0) { return "$($p.name): git said '$([string]($head | Select-Object -First 1))'" }
+    $branch = [string]($head | Select-Object -First 1)
+    if ($branch -eq 'HEAD') { return "$($p.name) has a detached HEAD; check out a branch first" }
+    Write-Host "$($p.name) on branch '$branch'" -ForegroundColor Cyan
+    $changed = @(& git -C $path status --porcelain)
+    $changed | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" }
+    if ($changed.Count -gt 15) { Write-Host "  ... and $($changed.Count - 15) more" }
+    if ($branch -match '^(main|master)$') {
+        if ((Read-Host "You are on '$branch'. Continue (y/N)") -notmatch '^[yY]') { return 'Cancelled' }
+    }
+    if ($changed.Count) {
+        $msg = (Read-Host 'Commit message (blank cancels)').Trim()
+        if (-not $msg) { return 'Cancelled' }
+        $f = [IO.Path]::GetTempFileName()
+        try {
+            [IO.File]::WriteAllText($f, $msg, (New-Object Text.UTF8Encoding($false)))
+            $out = & git -C $path add -A 2>&1
+            if ($LASTEXITCODE -ne 0) { return "git add failed: $([string]($out | Select-Object -Last 1))" }
+            $out = & git -C $path commit -F $f 2>&1
+        } finally { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+        if ($LASTEXITCODE -ne 0) { return [string]($out | Select-Object -Last 1) }
+        Write-Host 'Committed.' -ForegroundColor Green
+    } elseif ((Read-Host 'Nothing to commit. Push anyway (y/N)') -notmatch '^[yY]') { return 'Nothing to commit' }
+    $out = & git -C $path push -u origin HEAD 2>&1
+    $out | Select-Object -Last 6 | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -ne 0) { [void](Read-Host 'Push failed. Enter to return'); return 'Push failed' }
+    $result = "Pushed $branch"
+    if ((Get-Command gh -ErrorAction SilentlyContinue) -and $branch -notmatch '^(main|master)$' -and (Read-Host 'Open a pull request (y/N)') -match '^[yY]') {
+        Push-Location $path
+        try { $pr = & gh pr create --fill 2>&1 } finally { Pop-Location }
+        $pr | Select-Object -Last 4 | ForEach-Object { Write-Host "  $_" }
+        $result = if ($LASTEXITCODE -eq 0) { "PR opened: $([string]($pr | Select-Object -Last 1))" } else { "Pushed $branch; gh pr create failed" }
+    }
+    [void](Read-Host 'Enter to return')
+    return $result
+}
+
+# V: the selected Claude pane's latest reply, read from the tail of its transcript (cached until the file changes).
+$script:previewOn = Join-Path $stateDir 'preview.on'
+$script:previewCache = @{}
+function Get-Preview($transcript) {
+    try {
+        $fi = Get-Item $transcript -ErrorAction Stop
+        $sig = "$($fi.LastWriteTimeUtc.Ticks)|$($fi.Length)"
+        $c = $script:previewCache[$transcript]
+        if ($c -and $c.sig -eq $sig) { return $c.val }
+        # Read the last 256 KB; when no reply text is in it (big tool results can fill it), widen to 1 MB, then 4 MB.
+        $tool = $null; $text = $null
+        foreach ($cap in 262144, 1048576, 4194304) {
+            $fs = [IO.File]::Open($transcript, 'Open', 'Read', 'ReadWrite')
+            try {
+                $total = $fs.Length
+                $n = [int][math]::Min($total, $cap)
+                [void]$fs.Seek(-[long]$n, 'End')
+                $buf = New-Object byte[] $n
+                $got = $fs.Read($buf, 0, $n)
+                $rows = [Text.Encoding]::UTF8.GetString($buf, 0, $got) -split "`n"
+            } finally { $fs.Dispose() }
+            $first = if ($n -lt $total) { 1 } else { 0 }   # the first row of a partial read is cut off
+            for ($i = $rows.Count - 1; $i -ge $first -and -not $text; $i--) {
+                if (-not $rows[$i].Trim()) { continue }
+                try { $o = $rows[$i] | ConvertFrom-Json } catch { continue }
+                if ($o.type -ne 'assistant') { continue }
+                foreach ($part in @($o.message.content)) {
+                    if ($part.type -eq 'text' -and $part.text) { $text = [string]$part.text }
+                    elseif ($part.type -eq 'tool_use' -and -not $tool -and -not $text) { $tool = [string]$part.name }
+                }
+            }
+            if ($text -or $n -ge $total) { break }
+        }
+        $val = [pscustomobject]@{ tool = $tool; text = $text }
+        $script:previewCache[$transcript] = @{ sig = $sig; val = $val }
+        return $val
+    } catch { return $null }
+}
+
+# Wrap text to the pane width, at most $max rows (last one ends in ~ when cut).
+function Wrap-Text($text, $w, $max) {
+    $t = ($text -replace '\s+', ' ').Trim()
+    $rows = @()
+    while ($t.Length -gt 0 -and $rows.Count -lt $max) {
+        if ($t.Length -le $w) { $rows += $t; $t = ''; break }
+        $cut = $t.LastIndexOf(' ', $w - 1, $w)
+        if ($cut -lt 1) { $cut = $w }
+        $rows += $t.Substring(0, $cut).TrimEnd()
+        $t = $t.Substring($cut).TrimStart()
+    }
+    if ($t.Length -gt 0 -and $rows.Count) { $rows[$rows.Count - 1] = $rows[$rows.Count - 1].TrimEnd('~') + '~' }
+    return , $rows
+}
+
+# /: incremental find. Typing moves the cursor to the first project whose name contains the text; Tab / Down
+# go to the next match, Up to the previous, Enter keeps the spot, Esc goes back. Nothing is hidden or saved.
+function Find-Project($projects, $cursor) {
+    $start = $cursor; $at = $cursor; $q = ''
+    function Match-From($from, $step) {
+        for ($n = 0; $n -lt $projects.Count; $n++) {
+            $j = (($from + $n * $step) % $projects.Count + $projects.Count) % $projects.Count
+            if ($projects[$j].name.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $j }
+        }
+        return -1
+    }
+    while ($true) {
+        $note = if ($q -and (Match-From $start 1) -lt 0) { '  (no match)' } else { '' }
+        Draw $projects $at "/$q$note   Enter keep, Esc cancel, Tab next"
+        $k = [Console]::ReadKey($true)
+        switch ($k.Key) {
+            'Escape' { return $start }
+            'Enter' { return $at }
+            'Backspace' { if ($q.Length) { $q = $q.Substring(0, $q.Length - 1) }; $m = Match-From $start 1; $at = if ($m -ge 0) { $m } else { $start } }
+            { $_ -eq 'Tab' -or $_ -eq 'DownArrow' } { if ($q) { $m = Match-From ($at + 1) 1; if ($m -ge 0) { $at = $m } } }
+            'UpArrow' { if ($q) { $m = Match-From ($at - 1) -1; if ($m -ge 0) { $at = $m } } }
+            default {
+                if ($k.KeyChar -and -not [char]::IsControl($k.KeyChar)) {
+                    $q += $k.KeyChar
+                    $m = Match-From $start 1
+                    $at = if ($m -ge 0) { $m } else { $start }
+                }
+            }
+        }
+    }
+}
+
 function Draw($projects, $cursor, $message) {
     Refresh-RepoInfo $projects
     $slots = Get-Slots
@@ -528,7 +695,24 @@ function Draw($projects, $cursor, $message) {
     }
 
     # Reserve room for the detail block and key help; scroll the project list to fit.
-    $detailHeight = 9 + $usageBlock.Count   # separator, path, model/hint, message (4), usage block, keys section (5)
+    # Preview rows (V): header plus up to 4 wrapped lines of the selected pane's latest reply.
+    $previewRows = @()
+    if ((Test-Path $script:previewOn) -and $projects.Count) {
+        $pp = $projects[$cursor]
+        $pst = $statuses[(Get-NormPath $pp.path)]
+        $pagent = Get-Agent $pp
+        if (-not $slots.ContainsKey((Get-NormPath $pp.path))) { $previewRows += , @('-- preview: not open --', 'DarkGray', $null) }
+        elseif ($pagent -ne 'claude') { $previewRows += , @("-- preview: claude only --", 'DarkGray', $null) }
+        else {
+            $pv = if ($pst -and $pst.transcript -and (Test-Path $pst.transcript)) { Get-Preview $pst.transcript } else { $null }
+            $head = '-- last reply --'
+            if ($pv -and $pv.tool) { $head = "-- running $($pv.tool) --" }
+            $previewRows += , @($head, 'Cyan', $null)
+            if ($pv -and $pv.text) { foreach ($r in (Wrap-Text $pv.text ([math]::Max(10, $width - 2)) 4)) { $previewRows += , @("  $r", 'Gray', $null) } }
+            else { $previewRows += , @('  (nothing yet)', 'DarkGray', $null) }
+        }
+    }
+    $detailHeight = 10 + $usageBlock.Count + $previewRows.Count   # separator, path, model/hint, message (4), usage block, keys section (6), preview
     $listHeight = [math]::Max(3, $height + 1 - $lines.Count - $detailHeight)
     # Open projects take three rows (model and effort, then context and compaction), so scroll by rows.
     function IsGroupStart($i) { $i -eq 0 -or (Get-Agent $projects[$i]) -ne (Get-Agent $projects[$i - 1]) }
@@ -652,12 +836,14 @@ function Draw($projects, $cursor, $message) {
         }
     }
     $bottom += , @($message, 'Yellow', $null)
+    foreach ($pr in $previewRows) { $bottom += , $pr }
     foreach ($ul in $usageBlock) { $bottom += , $ul }
     # One status line on the last row: keys, then the git/compact symbol legend (cut off by width if needed).
     $bottom += , @('-- keys --', 'Cyan', $null)
     $bottom += , @('Enter open  M move  R sync  X close', 'Gray', $null)
-    $bottom += , @('D del A add G agent F diff W tree', 'Gray', $null)
+    $bottom += , @('D del A add G agent F diff W tree H hooks', 'Gray', $null)
     $bottom += , @("Shift+Up/Down reorder  T toast $(if (Test-Path $script:toastOff) { 'off' } else { 'on' })", 'Gray', $null)
+    $bottom += , @("P push/PR  / find  V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })", 'Gray', $null)
     $bottom += , @("$($icon.changed)n changed $($icon.ahead)push $($icon.behind)pull $($icon.wtree)wt=worktree", 'DarkGray', $null)
     $bottom += , @("$($icon.compact)=compacts at", 'DarkGray', $null)
     $room = [math]::Max(0, $height + 1 - $bottom.Count)
@@ -714,6 +900,10 @@ try {
     foreach ($item in $saved) { foreach ($path in $item) { $restore.Enqueue([string]$path) } }
 } catch { }
 if ($restore.Count) { $message = "Reopening $($restore.Count) project(s)" }
+$generated = @(Initialize-GeneratedConfigs)
+if ($generated.Count) { $message = "Hook files ready in windows\generated ($($generated.Count)); see README" }
+$hookPending = @(Get-HookPending)
+if ($hookPending.Count) { $message = "Press H to install status hooks for: $($hookPending -join ', ')" }
 $lastRestore = [datetime]::MinValue
 $lastOpenCheck = [datetime]::MinValue
 $savedOpen = $null
@@ -725,6 +915,8 @@ $dirty = $true
 $follow = $null
 $lastSize = ''
 while ($true) {
+  # One bad tick (a half-read file, a failed wt call) must not kill the dashboard: log it and carry on.
+  try {
     Set-Content $alive (Get-Date).ToString('o')
     $projects = @(Get-SortedProjects)
     if ($follow) {
@@ -739,15 +931,32 @@ while ($true) {
     # Pane windows that went away (closed with X or by hand): drop them from the layout.
     if (((Get-Date) - $lastPaneCheck).TotalSeconds -ge 0.5) {
         $lastPaneCheck = Get-Date
+        $closedNow = @()
         foreach ($dead in @(Get-DeadPanes)) {
-            if (Remove-Pane $dead) {
-                # Every close: reshape for the open panes, then read every place back so the layout matches the screen.
-                $reshaped = Optimize-Layout
-                $message = if (Sync-Layout) { if ($reshaped) { "Pane $dead closed, panes reshaped" } else { "Pane $dead closed, layout re-read" } } else { "Pane $dead closed (press R to re-read the layout)" }
-                [void](Focus-Dashboard)
-                $dirty = $true
+            # A hand-closed pane can leave its CLI running; stop it before Remove-Pane deletes the slot file that names the wrapper.
+            try {
+                $deadJob = Get-Content (Join-Path $stateDir "slot$dead.json") -Raw -ErrorAction Stop | ConvertFrom-Json
+                [void](Stop-OrphanedSlotChildren $deadJob.pid $deadJob.since)
+            } catch { }
+            if (Remove-Pane $dead) { $closedNow += $dead }
+            else {
+                # Last pane closed by hand: nobody is left to rewrite its heartbeat, so forget its files and let the
+                # next Enter split a fresh pane off the dashboard (New-FirstPane).
+                foreach ($ext in 'pane', 'assign', 'json', 'close', 'exit') { Remove-Item (Join-Path $stateDir "slot$dead.$ext") -Force -ErrorAction SilentlyContinue }
+                if ((Get-PaneCount) -lt 2) {
+                    Set-Content (Join-Path $stateDir 'nopanes') $dead
+                    $message = "Pane $dead closed; the next project opens a new pane"
+                    $dirty = $true
+                }
             }
-            else { Remove-Item (Join-Path $stateDir "slot$dead.pane") -Force -ErrorAction SilentlyContinue }   # last pane: slot.ps1 rewrites it
+        }
+        if ($closedNow.Count) {
+            # Once per batch of closes: reshape for the open panes, then read every place back so the layout matches the screen.
+            $label = $closedNow -join ', '
+            $reshaped = Optimize-Layout
+            $message = if (Sync-Layout) { if ($reshaped) { "Pane $label closed, panes reshaped" } else { "Pane $label closed, layout re-read" } } else { "Pane $label closed (press R to re-read the layout)" }
+            [void](Focus-Dashboard)
+            $dirty = $true
         }
     }
 
@@ -897,13 +1106,37 @@ while ($true) {
                 # Diff of the selected project in its own tab, so the dashboard stays as is; git pages it (q closes the tab).
                 if ($projects.Count) {
                     $p = $projects[$cursor]
-                    Invoke-Wt "new-tab $script:wtProfile --title `"diff $($p.name)`" -d `"$($p.path)`" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\diffview.ps1`" -Path `"$($p.path)`""
+                    # wt treats ';' as a command separator; '\;' passes a literal one through (a folder name may contain it).
+                    $wtName = $p.name -replace ';', '\;'; $wtPath = $p.path -replace ';', '\;'
+                    Invoke-Wt "new-tab $script:wtProfile --title `"diff $wtName`" -d `"$wtPath`" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\diffview.ps1`" -Path `"$wtPath`""
                     $message = "Diff of $($p.name) opened in a new tab"
                 }
             }
             'T' {
                 if (Test-Path $script:toastOff) { Remove-Item $script:toastOff -Force -ErrorAction SilentlyContinue; $message = 'Toasts on' }
                 else { Set-Content $script:toastOff (Get-Date).ToString('o'); $message = 'Toasts off' }
+            }
+            'P' {
+                if ($projects.Count) {
+                    $p = $projects[$cursor]
+                    Clear-Host
+                    $message = Publish-Project $p
+                    Clear-Host
+                }
+            }
+            'H' {
+                # Opt-in: copy tai's status hooks into the CLIs' own configs (backup + merge, asks per CLI).
+                $targets = @((Get-HookTargets).Keys | Where-Object { Test-AgentInstalled $_ })
+                Clear-Host
+                $message = if ($targets.Count) { Install-AgentHooks $targets } else { 'No CLI with hook support is installed' }
+                Clear-Host
+            }
+            'V' {
+                if (Test-Path $script:previewOn) { Remove-Item $script:previewOn -Force -ErrorAction SilentlyContinue; $message = 'Preview off' }
+                else { Set-Content $script:previewOn (Get-Date).ToString('o'); $message = 'Preview on' }
+            }
+            { $_ -eq 'Oem2' -or $_ -eq 'Divide' } {
+                if ($projects.Count -gt 1) { $cursor = Find-Project $projects $cursor }
             }
             'W' {
                 # New git worktree on a new branch, added to the project list as its own project.
@@ -930,6 +1163,7 @@ while ($true) {
             'R' {
                 Draw $projects $cursor 'Re-reading layout...'
                 $message = if (Sync-Layout) { 'Layout re-read' } else { 'Could not read the layout' }
+                [void](Focus-Dashboard)   # Sync-Layout leaves focus on the last pane it probed
             }
             'X' {
                 if ($projects.Count) {
@@ -946,12 +1180,16 @@ while ($true) {
             'D' {
                 if ($projects.Count) {
                     $p = $projects[$cursor]
-                    Clear-Host
-                    $answer = Read-Host "Remove '$($p.name)' from the list? Folder is kept (y/N)"
-                    if ($answer -match '^[yY]') {
-                        Save-Projects @($projects | Where-Object { $_.name -ne $p.name })
+                    if ((Get-Slots).ContainsKey((Get-NormPath $p.path))) {
+                        $message = "$($p.name) is open; close it with X first"
+                    } else {
+                        Clear-Host
+                        $answer = Read-Host "Remove '$($p.name)' from the list? Folder is kept (y/N)"
+                        if ($answer -match '^[yY]') {
+                            Save-Projects @($projects | Where-Object { $_.name -ne $p.name })
+                        }
+                        Clear-Host
                     }
-                    Clear-Host
                 }
             }
         }
@@ -973,4 +1211,9 @@ while ($true) {
     } else {
         Start-Sleep -Milliseconds 80
     }
+  } catch {
+    Write-Boot "dashboard loop error: $($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)"
+    $dirty = $true
+    Start-Sleep -Milliseconds 300
+  }
 }

@@ -7,6 +7,141 @@ $script:stateRoot = Join-Path $PSScriptRoot 'state'
 $script:wtProfile = '-p terminal_ai'   # profile with the smaller font; see setup-profile.ps1
 $script:psCmd = 'powershell.exe -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File'
 
+# Fills in this checkout's folder in every tracked windows\*.example.json hook/settings template and writes the result
+# to windows\generated\ (git-ignored), so nothing has to be edited by hand before copying it into a CLI's own config.
+# Existing generated files are left alone (they may have been edited); delete one to regenerate it. Returns the names created.
+function Initialize-GeneratedConfigs {
+    $made = @()
+    try {
+        $outDir = Join-Path $script:libRoot 'generated'
+        $repoRoot = (Split-Path $script:libRoot -Parent) -replace '\\', '/'
+        foreach ($f in Get-ChildItem -LiteralPath $script:libRoot -Filter '*.example.json' -File) {
+            # The project list is not a hook template, and slot.ps1 already makes claude-settings.json itself.
+            if ($f.Name -in 'projects.example.json', 'claude-settings.example.json') { continue }
+            $target = Join-Path $outDir ($f.Name -replace '\.example\.json$', '.json')
+            if (Test-Path -LiteralPath $target) { continue }
+            New-Item -ItemType Directory -Force $outDir | Out-Null
+            $text = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8).Replace('C:/path/to/terminal_ai', $repoRoot)
+            $tmp = "$target.$PID.tmp"
+            [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding $false))
+            Move-Item -LiteralPath $tmp -Destination $target -Force
+            $made += ($f.Name -replace '\.example\.json$', '.json')
+        }
+    } catch { }
+    $made   # emitted item by item; callers wrap the call in @(...)
+}
+
+# ---- Opt-in install of the generated hook files into each CLI's own config (dashboard key H) ----
+# Targets: where the CLI reads hooks, the generated file to take them from, and whether to merge into an existing file
+# ('merge') or own the whole file ('own'). Schemas for qwen/cursor/copilot come from docs and are unconfirmed.
+function Get-HookTargets {
+    $h = $env:USERPROFILE
+    [ordered]@{
+        codex   = @{ file = (Join-Path $h '.codex\hooks.json');          src = 'codex-hooks.json';   mode = 'merge'
+                     note = 'Codex also needs [features] hooks = true in ~/.codex/config.toml and trusting the hooks on first run.' }
+        qwen    = @{ file = (Join-Path $h '.qwen\settings.json');        src = 'qwen-settings.json'; mode = 'merge'; note = '' }
+        cursor  = @{ file = (Join-Path $h '.cursor\hooks.json');         src = 'cursor-hooks.json';  mode = 'merge'; note = '' }
+        copilot = @{ file = (Join-Path $h '.copilot\hooks\tai.json');    src = 'copilot-hooks.json'; mode = 'own';   note = '' }
+    }
+}
+
+function Get-HookAnswers {
+    $f = Join-Path $script:stateRoot 'hooks-install.json'
+    $r = @{}
+    try { $o = Get-Content -LiteralPath $f -Raw -ErrorAction Stop | ConvertFrom-Json; foreach ($n in $o.PSObject.Properties) { $r[$n.Name] = [string]$n.Value } } catch { }
+    $r
+}
+
+function Save-HookAnswers($answers) {
+    $f = Join-Path $script:stateRoot 'hooks-install.json'
+    New-Item -ItemType Directory -Force $script:stateRoot | Out-Null
+    $tmp = "$f.$PID.tmp"
+    [IO.File]::WriteAllText($tmp, ($answers | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $f -Force
+}
+
+# CLIs that are installed, have a hook target and have not been answered yet.
+function Get-HookPending {
+    $ans = Get-HookAnswers
+    @((Get-HookTargets).Keys | Where-Object { $ans.ContainsKey($_) -eq $false -and (Test-AgentInstalled $_) })
+}
+
+# Adds our hook entries to an existing config object without touching anything else. An event that already points at this
+# checkout's hook.ps1 is left alone, so running it twice changes nothing. Returns the number of entries added.
+function Merge-HookConfig($cfg, $gen, $marker) {
+    $added = 0
+    if (-not $cfg.PSObject.Properties['hooks']) { $cfg | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
+    foreach ($ev in $gen.hooks.PSObject.Properties) {
+        $have = @(if ($cfg.hooks.PSObject.Properties[$ev.Name]) { $cfg.hooks.($ev.Name) })   # @() keeps a single entry an array
+        if ((ConvertTo-Json $have -Depth 10 -Compress) -like "*$marker*") { continue }
+        $merged = $have + @($ev.Value)
+        if ($cfg.hooks.PSObject.Properties[$ev.Name]) { $cfg.hooks.($ev.Name) = $merged }
+        else { $cfg.hooks | Add-Member -NotePropertyName $ev.Name -NotePropertyValue $merged }
+        $added++
+    }
+    foreach ($top in $gen.PSObject.Properties) {   # other top-level keys (e.g. "version") only if the user has none
+        if ($top.Name -ne 'hooks' -and -not $cfg.PSObject.Properties[$top.Name]) { $cfg | Add-Member -NotePropertyName $top.Name -NotePropertyValue $top.Value }
+    }
+    $added
+}
+
+# Asks, then installs, for each CLI in $names. Returns a one-line summary. The user's file is copied to *.tai-backup first.
+function Install-AgentHooks($names) {
+    $targets = Get-HookTargets
+    $ans = Get-HookAnswers
+    $marker = ((Split-Path $script:libRoot -Parent) -replace '\\', '/') + '/windows/hook.ps1'
+    Initialize-GeneratedConfigs | Out-Null
+    $done = @(); $skipped = @(); $failed = @()
+    foreach ($n in $names) {
+        $t = $targets[$n]
+        if (-not $t) { continue }
+        $gensrc = Join-Path $script:libRoot ('generated\' + $t.src)
+        $what = if (Test-Path -LiteralPath $t.file) { "$(if ($t.mode -eq 'own') { 'replace' } else { 'merge into' }) $($t.file) (backup kept)" } else { "create $($t.file)" }
+        Write-Host ''
+        Write-Host "${n}: $what" -ForegroundColor Cyan
+        if ((Read-Host 'Install tai status hooks (y/N)') -notmatch '^[yY]') { $ans[$n] = 'declined'; $skipped += $n; continue }
+        try {
+            $gen = [IO.File]::ReadAllText($gensrc, [Text.Encoding]::UTF8) | ConvertFrom-Json
+            New-Item -ItemType Directory -Force (Split-Path $t.file -Parent) | Out-Null
+            $exists = Test-Path -LiteralPath $t.file
+            $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+            $write = $true
+            if ($t.mode -eq 'own' -or -not $exists) {
+                $text = [IO.File]::ReadAllText($gensrc, [Text.Encoding]::UTF8)
+                if ($exists) {
+                    if ([IO.File]::ReadAllText($t.file, [Text.Encoding]::UTF8) -ceq $text) { $write = $false }   # already identical
+                    else { Copy-Item -LiteralPath $t.file -Destination "$($t.file).tai-backup-$stamp" }
+                }
+            } else {
+                $cfg = [IO.File]::ReadAllText($t.file, [Text.Encoding]::UTF8) | ConvertFrom-Json   # throws on invalid JSON: file untouched
+                if (-not $cfg) { throw 'config is empty or not a JSON object' }
+                $added = Merge-HookConfig $cfg $gen $marker
+                if ($added -gt 0) {
+                    Copy-Item -LiteralPath $t.file -Destination "$($t.file).tai-backup-$stamp"   # backup only when the file changes
+                    $text = $cfg | ConvertTo-Json -Depth 20
+                } else { $write = $false }   # already installed
+            }
+            if ($write) {
+                $tmp = "$($t.file).$PID.tmp"
+                [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding $false))
+                Move-Item -LiteralPath $tmp -Destination $t.file -Force
+            }
+            $ans[$n] = 'installed'; $done += $n
+            if ($t.note) { Write-Host $t.note -ForegroundColor Yellow }
+        } catch {
+            $failed += $n
+            Write-Host "${n}: not installed - $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    Save-HookAnswers $ans
+    $parts = @()
+    if ($done.Count) { $parts += "installed: $($done -join ', ')" }
+    if ($skipped.Count) { $parts += "skipped: $($skipped -join ', ')" }
+    if ($failed.Count) { $parts += "failed: $($failed -join ', ')" }
+    if ($failed.Count -or ($done | Where-Object { $targets[$_].note })) { Read-Host 'Press Enter to continue' | Out-Null }
+    if ($parts.Count) { 'Hooks ' + ($parts -join '; ') } else { 'Hooks: nothing to do' }
+}
+
 # Boot timeline in state\boot.log (tai.ps1 starts it fresh at every launch): shows where start-up time goes.
 function Write-Boot($what) {
     try { Add-Content (Join-Path $script:stateRoot 'boot.log') ('{0:HH:mm:ss.fff} {1}' -f (Get-Date), $what) } catch { }
@@ -198,17 +333,6 @@ function Get-NextSplit($rects) {
     return $null
 }
 
-# How many panes the window can hold: the current count plus every split that still fits.
-function Get-PaneLimit {
-    $rects = Get-Rects (Get-PaneCount)
-    while ($true) {
-        $plan = Get-NextSplit $rects
-        if (-not $plan) { break }
-        $rects = $plan.rects
-    }
-    return $rects.Count
-}
-
 # wt arguments that start the slot script in a pane (used by tai.ps1 and New-Pane).
 function New-SlotArgs($n) {
     "$script:wtProfile --title `"pane $n`" -d `"$script:libRoot`" $script:psCmd `"$script:libRoot\slot.ps1`" -Slot $n"
@@ -275,10 +399,27 @@ function New-Pane($n, $batch = $null) {
     $old = @(Get-Layout $count)
     Save-Layout (@($old | Select-Object -First $how.at) + [int]$n + @($old | Select-Object -Skip $how.at))
     Set-Content (Join-Path $script:stateRoot 'panes.count') ($count + 1)   # $n is the slot number, which can exceed the count
+    # Stub heartbeat (pid 0): slot.ps1 overwrites it once the pane is up; if the pane is closed first, Get-DeadPanes still notices.
+    [pscustomobject]@{ slot = [int]$n; pid = 0; since = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $script:stateRoot "slot$n.pane") -Encoding utf8
     # With a $batch list the steps are only collected; the caller runs them all in one wt call (see Start-PaneBatch).
     if ($null -ne $batch) { $batch.AddRange([string[]]$steps) }
     else { Invoke-Wt $steps }
     return $true
+}
+
+# The only slot pane was closed by hand, so the dashboard fills the window again: the next project splits a pane
+# off the dashboard exactly like a fresh start (flag file 'nopanes', set by the dashboard's dead-pane handler).
+function Test-NoPanes { Test-Path (Join-Path $script:stateRoot 'nopanes') }
+
+function New-FirstPane($n, $batch = $null) {
+    $stateRoot = $script:stateRoot
+    Save-Layout @([int]$n)
+    Set-Content (Join-Path $stateRoot 'panes.count') 1
+    Save-Rects @(, $script:firstRect)
+    Remove-Item (Join-Path $stateRoot 'nopanes') -Force -ErrorAction SilentlyContinue
+    [pscustomobject]@{ slot = [int]$n; pid = 0; since = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $stateRoot "slot$n.pane") -Encoding utf8
+    $steps = @('move-focus first', "split-pane -V -s 0.8 $(New-SlotArgs $n)")
+    if ($null -ne $batch) { $batch.AddRange([string[]]$steps) } else { Invoke-Wt $steps }
 }
 
 # Run the collected New-Pane steps as one wt command line (one process start instead of one per pane).
@@ -409,6 +550,11 @@ function Get-DeadPanes {
     $dead = @()
     foreach ($f in Get-ChildItem $script:stateRoot -Filter 'slot*.pane' -ErrorAction SilentlyContinue) {
         try { $p = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json } catch { continue }
+        if (-not $p.pid) {
+            # Stub written by New-Pane before wt starts the pane: dead only if the pane never came up (closed during startup).
+            try { if (((Get-Date) - [datetime]$p.since).TotalSeconds -gt 20) { $dead += [int]$p.slot } } catch { $dead += [int]$p.slot }
+            continue
+        }
         if (-not (Test-SlotAlive $p.pid $p.since)) { $dead += [int]$p.slot }
     }
     return $dead
@@ -516,11 +662,24 @@ function Move-Pane($slot, $dir) {
 function Test-WinPath($p) { ($p -is [string]) -and ($p -match '^([A-Za-z]:|\\\\)') }
 
 function Read-ProjectsRaw {
-    if (-not (Test-Path $script:configPath)) { return @() }
-    $raw = Get-Content $script:configPath -Raw
-    if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+    if (-not (Test-Path -LiteralPath $script:configPath)) { return @() }
+    # UTF-8 explicitly (Get-Content defaults to ANSI on PS 5.1 and would corrupt non-ASCII names). A read that
+    # collides with a save, or a half-written file, falls back to the last text that parsed.
+    $parsed = $null
+    foreach ($try in 1..3) {
+        try {
+            $raw = [IO.File]::ReadAllText($script:configPath, [Text.Encoding]::UTF8)
+            if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+            $parsed = ConvertFrom-Json $raw
+            $script:lastGoodProjectsRaw = $raw
+            break
+        } catch { Start-Sleep -Milliseconds 40 }
+    }
+    if ($null -eq $parsed) {
+        if (-not $script:lastGoodProjectsRaw) { return @() }
+        $parsed = ConvertFrom-Json $script:lastGoodProjectsRaw
+    }
     # PS 5.1 emits a JSON array as one object; unwrap it by enumerating explicitly.
-    $parsed = ConvertFrom-Json $raw
     $list = @()
     foreach ($p in $parsed) { $list += $p }
     return $list
@@ -635,7 +794,10 @@ function Save-Projects($projects) {
     while ($vi -lt $out.Count) { $merged += $out[$vi]; $vi++ }
     $json = ConvertTo-Json -InputObject $merged -Depth 5
     # BOM-less so jq on Linux can read the same file.
-    [IO.File]::WriteAllText($script:configPath, $json, (New-Object Text.UTF8Encoding $false))
+    # Temp file + replace, so a reader never sees a half-written projects.json.
+    $tmp = "$($script:configPath).tmp"
+    [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $script:configPath -Force
 }
 
 # Saves a new CLI for the project at $path (re-reads the file, so it is safe from a pane while the dashboard runs).
@@ -680,4 +842,26 @@ function Test-SlotAlive($slotPid, $since) {
     if (-not $p -or $p.ProcessName -ne 'powershell') { return $false }
     if ($since -and $p.StartTime -gt [datetime]$since) { return $false }
     return $true
+}
+
+# A slot wrapper that was killed from outside leaves its CLI running, orphaned, in the pane. Its parent pid
+# still points at the dead wrapper, so stop those processes (and their trees). If Windows has reused the
+# pid, only children created before the new process started count, so an unrelated process is never touched.
+# Returns how many orphans were stopped.
+function Stop-OrphanedSlotChildren($slotPid, $since) {
+    # $since (when the wrapper started) is required: Windows never rewrites a stale parent pid, so without it an
+    # unrelated old process could look like a child of a pid that was recycled.
+    if (-not $slotPid -or -not $since) { return 0 }
+    try { $sinceDt = [datetime]$since } catch { return 0 }
+    $reused = Get-Process -Id $slotPid -ErrorAction SilentlyContinue
+    $reusedStart = $null
+    if ($reused) { try { $reusedStart = $reused.StartTime } catch { return 0 } }   # protected process: leave it alone
+    $count = 0
+    foreach ($k in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$([int]$slotPid)" -ErrorAction SilentlyContinue)) {
+        if ($k.CreationDate -lt $sinceDt.AddSeconds(-2)) { continue }
+        if ($reusedStart -and $k.CreationDate -ge $reusedStart) { continue }
+        & taskkill.exe /PID $k.ProcessId /T /F *> $null
+        if ($LASTEXITCODE -eq 0) { $count++ }
+    }
+    return $count
 }

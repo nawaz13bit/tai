@@ -1,5 +1,7 @@
 # Personal config (project list with local paths)
 projects.json
+windows/claude-settings.json
+windows/generated/
 
 # Runtime data
 state/

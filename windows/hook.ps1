@@ -1,6 +1,6 @@
 # Claude Code hook (UserPromptSubmit, Notification, Stop, SessionEnd, SubagentStart/Stop): records what the
 # session is doing so the dashboard can show working / waiting-for-you / done.
-$raw = [Console]::In.ReadToEnd()
+$raw = (New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false))).ReadToEnd()   # UTF-8, not the OEM code page, so non-ASCII paths keep their state key
 if ([string]::IsNullOrWhiteSpace($raw)) { return }
 try { $data = $raw | ConvertFrom-Json } catch { return }
 
@@ -36,8 +36,11 @@ if ($data.session_id -and $data.cwd) {
             }
         }
         $keep += "$sid`t$($data.cwd)`t$($now.ToString('o'))"
-        Set-Content $mapFile $keep -Encoding utf8
-    } catch { }
+        # Write-then-rename: the dashboard reads this file without the lock and must never see a half-written one.
+        $mapTmp = "$mapFile.$PID.tmp"
+        Set-Content $mapTmp $keep -Encoding utf8
+        Move-Item $mapTmp $mapFile -Force
+    } catch { Remove-Item "$mapFile.$PID.tmp" -Force -ErrorAction SilentlyContinue }
     finally { try { $mapMutex.ReleaseMutex() } catch { } }
 }
 
@@ -87,13 +90,22 @@ if ($env:TAI_AGENT -in 'codex', 'cursor', 'qwen', 'copilot' -and ($hasModel -or 
     if ($hasModel) { $st['model'] = $data.model }
     if ($null -ne $ctxPct) { $st['ctx'] = $ctxPct }
     $sj = [pscustomobject]$st | ConvertTo-Json
-    try { Set-Content "$sf.tmp" $sj -Encoding utf8 -ErrorAction Stop; Move-Item "$sf.tmp" $sf -Force } catch { }
+    try { Set-Content "$sf.$PID.tmp" $sj -Encoding utf8 -ErrorAction Stop; Move-Item "$sf.$PID.tmp" $sf -Force } catch { Remove-Item "$sf.$PID.tmp" -Force -ErrorAction SilentlyContinue }
 }
 $file = Join-Path $stateDir ('hook_' + (Get-StateKey $dir) + '.json')
 if (-not $status) {   # SessionEnd
     Remove-Item $file -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $stateDir ('subs_' + (Get-StateKey $dir) + '.txt')) -Force -ErrorAction SilentlyContinue
     return
+}
+
+# Hooks run as separate processes, so a PreToolUse that started before Stop can finish after it and would turn
+# "done" back into "working". Ignore a PreToolUse that lands within 5 s of a fresh "done".
+if ($event -eq 'PreToolUse' -and (Test-Path $file)) {
+    try {
+        $prev = Get-Content $file -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($prev.status -eq 'done' -and ((Get-Date) - [datetime]$prev.updated).TotalSeconds -lt 5) { return }
+    } catch { }
 }
 
 $json = [pscustomobject]@{
@@ -103,6 +115,6 @@ $json = [pscustomobject]@{
     updated = (Get-Date).ToString('o')
 } | ConvertTo-Json
 try {
-    Set-Content "$file.tmp" $json -Encoding utf8 -ErrorAction Stop
-    Move-Item "$file.tmp" $file -Force
-} catch { }
+    Set-Content "$file.$PID.tmp" $json -Encoding utf8 -ErrorAction Stop
+    Move-Item "$file.$PID.tmp" $file -Force
+} catch { Remove-Item "$file.$PID.tmp" -Force -ErrorAction SilentlyContinue }

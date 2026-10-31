@@ -22,6 +22,22 @@ function Open-Workspace {
         Write-Host 'Workspace is already open (dashboard is running).'
         return
     }
+    # A second run right after the first would pass the check above (the dashboard has not written its heartbeat yet).
+    $launching = Join-Path $stateDir 'dashboard.launching'
+    if ((Test-Path $launching) -and ((Get-Date) - (Get-Item $launching).LastWriteTime).TotalSeconds -lt 20) {
+        Write-Host 'Workspace is starting up; give it a few seconds.'
+        return
+    }
+    # Start with the dashboard and one pane; the dashboard splits in more as projects open (see lib.ps1).
+    $parts = @(
+        "-M -w tai new-tab $script:wtProfile --title dashboard -d `"$root`" $script:psCmd `"$root\dashboard.ps1`"",
+        "split-pane -V -s 0.8 $(New-SlotArgs 1)",
+        'move-focus first'
+    )
+    $wtArgs = $parts -join ' ; '
+    # -DryRun only prints the command: it must not touch any saved state, so it returns before the cleanup below.
+    if ($DryRun) { Write-Host $wtArgs; return }
+
     New-Item -ItemType Directory -Force $stateDir | Out-Null
     Remove-Item (Join-Path $stateDir 'boot.log') -Force -ErrorAction SilentlyContinue
     Write-Boot 'tai: start'
@@ -39,18 +55,12 @@ function Open-Workspace {
     Remove-Item (Join-Path $stateDir 'hook_*') -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $stateDir 'subs_*') -Force -ErrorAction SilentlyContinue
 
-    # Start with the dashboard and one pane; the dashboard splits in more as projects open (see lib.ps1).
     Remove-Item (Join-Path $stateDir 'layout.json') -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $stateDir 'cells.json') -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $stateDir 'nopanes') -Force -ErrorAction SilentlyContinue
     Set-Content (Join-Path $stateDir 'panes.count') 1
     Save-Rects @(, $script:firstRect)
-    $parts = @(
-        "-M -w tai new-tab $script:wtProfile --title dashboard -d `"$root`" $script:psCmd `"$root\dashboard.ps1`"",
-        "split-pane -V -s 0.8 $(New-SlotArgs 1)",
-        'move-focus first'
-    )
-    $wtArgs = $parts -join ' ; '
-    if ($DryRun) { Write-Host $wtArgs; return }
+    Set-Content $launching (Get-Date).ToString('o')   # the dashboard deletes this once it is running
     Start-Process wt.exe -ArgumentList $wtArgs
     Write-Boot 'tai: wt launched'
 }

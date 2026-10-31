@@ -18,7 +18,7 @@ sel=0 top=0 H=40 W=$DASH_COLS FULL=1 NEED_GATHER=0
 MSG="CLIs found: ${INSTALLED[*]}"
 names=() paths=() agents=() order=() prev=() USAGE=()
 declare -A SKEY P_pid P_since S_model S_eff S_ctx S_cmp S_quota S_act S_upd S_tr S_trm
-declare -A H_st H_upd SUBN SHN G G_t GH
+declare -A H_st H_upd SUBN SHN G G_t GH P_id
 now=0 last_ps=0 last_usage=0
 
 size() {
@@ -52,9 +52,9 @@ load() {
 gather() {
     printf -v now '%(%s)T' -1
     local id pid p ag since f d m e c k q ac u t st
-    P_pid=() P_since=()
+    P_pid=() P_since=() P_id=()
     while IFS=$'\t' read -r id pid p ag since; do
-        P_pid[$p]=$pid; P_since[$p]=${since:-0}
+        P_pid[$p]=$pid; P_since[$p]=${since:-0}; P_id[$p]=$id
     done < <(tmux list-panes -s -t "$SESSION" -F '#{pane_id}'$'\t''#{pane_pid}'$'\t''#{@tai_path}'$'\t''#{@tai_agent}'$'\t''#{@tai_since}' |
              awk -F'\t' '$3 != ""')
 
@@ -103,6 +103,7 @@ gather() {
 # waiting, so starting the dashboard does not announce old prompts. The T key toggles toasts via the toast.off flag file;
 # while off, waiting states are still recorded, so turning toasts back on does not announce prompts already waiting.
 TOAST_OFF="$STATE_DIR/toast.off"
+PREVIEW_ON="$STATE_DIR/preview.on"
 declare -A NOTIFIED
 notify_seeded=0
 notify_waiting() {
@@ -393,10 +394,21 @@ render() {
     fi
     ((${#selp} > W - 2)) && selp="…${selp: -$((W - 3))}"
     core+=("$C_DIM$SEP$C_RST" "$C_DIM$selp$C_RST" "$C_DIM$hint$C_RST" "$C_WORK${MSG:0:$((W - 1))}$C_RST")
+    # V: the last lines of the selected pane's screen (tmux capture-pane), any CLI.
+    if [[ -e "$PREVIEW_ON" && -n "$selp" ]]; then
+        local pid_=${P_id[${paths[${order[sel]}]}]:-} pl
+        if [[ -z "$pid_" ]]; then core+=("$C_DIM-- preview: not open --$C_RST")
+        else
+            core+=("$C_HEAD-- screen --$C_RST")
+            while IFS= read -r pl; do core+=("  $C_DIM${pl:0:$((W - 3))}$C_RST"); done < <(
+                tmux capture-pane -p -J -t "$pid_" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -4)
+        fi
+    fi
     keys+=("$C_HEAD-- keys --$C_RST"
            "$C_DIM↑↓ select  ⏎ open  X close$C_RST"
            "$C_DIM D remove  A add  G cli$C_RST"
            "$C_DIM⇧↑↓ reorder  F diff  W tree$C_RST"
+           "$C_DIM P push/PR  / find  V view$C_RST"
            "$C_DIM T toasts  M+arrow move  Q quit$C_RST"
            "$C_DIM◐ work  ! wait  ✓ done  ○ idle$C_RST"
            "$C_DIM▶ shells  ◈ sub-agents  Alt+D$C_RST")
@@ -465,6 +477,72 @@ add_flow() {
     add_project "$dir" || return
     load
     MSG="Added $(basename "$dir")"
+}
+
+# P: commit everything, push the branch, optionally open a PR with gh (--fill). Prompts on the full screen.
+publish_flow() {   # name dir
+    local name=$1 dir=$2 br ch msg out ans
+    export GIT_TERMINAL_PROMPT=0   # a missing credential fails instead of hanging the dashboard
+    printf '\e[H\e[2J\e[?25h'
+    if ! br="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>&1)"; then MSG="$name is not a git repository"; return; fi
+    printf '\e[1m%s\e[0m on branch %s\n' "$name" "$br"
+    ch="$(git -C "$dir" status --porcelain)"
+    [[ -n "$ch" ]] && printf '%s\n' "$ch" | head -15 | sed 's/^/  /'
+    if [[ "$br" == main || "$br" == master ]]; then
+        read -rp "You are on '$br'. Continue (y/N) " ans; [[ "$ans" == [yY]* ]] || { MSG="Cancelled"; return; }
+    fi
+    if [[ -n "$ch" ]]; then
+        read -rp "Commit message (blank cancels): " msg
+        [[ -n "$msg" ]] || { MSG="Cancelled"; return; }
+        git -C "$dir" add -A
+        if ! out="$(git -C "$dir" commit -m "$msg" 2>&1)"; then MSG="${out##*$'\n'}"; return; fi
+        printf 'Committed.\n'
+    else
+        read -rp "Nothing to commit. Push anyway (y/N) " ans; [[ "$ans" == [yY]* ]] || { MSG="Nothing to commit"; return; }
+    fi
+    if ! out="$(git -C "$dir" push -u origin HEAD 2>&1)"; then
+        printf '%s\n' "$out" | tail -6 | sed 's/^/  /'
+        read -rp "Push failed. Enter to return" ans; MSG="Push failed"; return
+    fi
+    printf '%s\n' "$out" | tail -6 | sed 's/^/  /'
+    MSG="Pushed $br"
+    if command -v gh >/dev/null && [[ "$br" != main && "$br" != master ]]; then
+        read -rp "Open a pull request (y/N) " ans
+        if [[ "$ans" == [yY]* ]]; then
+            if out="$(cd "$dir" && gh pr create --fill 2>&1)"; then MSG="PR opened: ${out##*$'\n'}"
+            else MSG="Pushed $br; gh pr create failed"; fi
+            printf '%s\n' "$out" | tail -4 | sed 's/^/  /'
+        fi
+    fi
+    read -rp "Enter to return" ans
+}
+
+# /: incremental find. Typing moves the highlight to the first project whose name contains the text; Tab / Down go
+# to the next match, Up to the previous, Enter keeps the spot, Esc goes back. Nothing is hidden or saved.
+find_match() {   # from step -> index of the next match (uses q), or nothing
+    local from=$1 step=$2 i j n=${#order[@]}
+    for ((i = 0; i < n; i++)); do
+        j=$(( ((from + i * step) % n + n) % n ))
+        [[ "${names[${order[j]}],,}" == *"${q,,}"* ]] && { echo "$j"; return; }
+    done
+}
+
+find_flow() {
+    local n=${#order[@]} start=$sel q="" m
+    ((n > 1)) || return
+    while true; do
+        MSG="/$q   Enter keep, Esc cancel, Tab next"
+        render
+        read_key || continue
+        case "$KEY" in
+            enter) MSG=""; return ;;
+            other) sel=$start; MSG=""; return ;;
+            $'\x7f'|$'\b') q=${q%?}; m="$(find_match "$start" 1)"; sel=${m:-$start} ;;
+            $'\t'|down) if [[ -n "$q" ]]; then m="$(find_match $((sel + 1)) 1)"; [[ -n "$m" ]] && sel=$m; fi ;;
+            up) if [[ -n "$q" ]]; then m="$(find_match $((sel - 1)) -1)"; [[ -n "$m" ]] && sel=$m; fi ;;
+            *) if ((${#KEY} == 1)); then q+=$KEY; m="$(find_match "$start" 1)"; sel=${m:-$start}; fi ;;
+        esac
+    done
 }
 
 # Reads a key into KEY; returns 1 on the 1 s timeout so the list can refresh.
@@ -556,6 +634,14 @@ while true; do
                 printf -v cmd 'git -C %q -c color.ui=always -c core.pager="less -R" diff HEAD --stat --patch || { echo "git diff failed (not a repo?)"; sleep 2; }' "${paths[cur]}"
                 tmux new-window -n "diff ${names[cur]}" -c "${paths[cur]}" "$cmd"
                 MSG="Diff of ${names[cur]} opened in a new window (q closes it)" ;;
+            p|P)
+                ((n)) || continue
+                publish_flow "${names[cur]}" "${paths[cur]}"
+                printf '\e[?25l'; FULL=1 ;;
+            v|V)
+                if [[ -e "$PREVIEW_ON" ]]; then rm -f "$PREVIEW_ON"; MSG="Preview off"
+                else : > "$PREVIEW_ON"; MSG="Preview on"; fi ;;
+            /)  find_flow ;;
             t|T)
                 if [[ -e "$TOAST_OFF" ]]; then rm -f "$TOAST_OFF"; MSG="Toasts on"
                 else date -Iseconds > "$TOAST_OFF" 2>/dev/null || : > "$TOAST_OFF"; MSG="Toasts off"; fi ;;

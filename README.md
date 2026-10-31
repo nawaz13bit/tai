@@ -20,9 +20,19 @@ Windows hook/statusline settings reference `windows/*.ps1` by absolute path.
 ## Quick start
 
 - **Windows** (PowerShell 5.1, Windows Terminal): copy `windows/projects.example.json` to `windows/projects.json` and
-  list your projects (or add them with `A` in the dashboard). Copy the hooks / `statusLine` from
-  `windows/claude-settings.json` into `~/.claude/settings.json`, replacing `C:/path/to/terminal_ai` with the folder you
-  cloned to (use forward slashes). The other `windows/*.example.json` files work the same way for their CLIs. Then run
+  list your projects (or add them with `A` in the dashboard). Claude panes need no manual setup: tai passes Claude
+  the hooks / `statusLine` in `windows/claude-settings.json`, which it creates on first start from
+  `windows/claude-settings.example.json` with `C:/path/to/terminal_ai` replaced by your checkout (forward slashes,
+  e.g. `C:/%username%/terminal_ai` if you cloned it to `C:\%username%\terminal_ai`; replace `%username%` with your real
+  folder name).
+  The example is the tracked template; `claude-settings.json` is the git-ignored copy actually in use. Delete it to
+  regenerate. Press `H` in the dashboard to install them for you: for each installed CLI (Codex, Qwen, Cursor,
+  Copilot) it asks y/N, copies your existing config to `*.tai-backup-<time>`, adds only tai's hook entries (nothing
+  else is changed; running it twice adds nothing) and remembers the answer in `state/hooks-install.json`. Codex still
+  needs `[features] hooks = true` in `~/.codex/config.toml`. Qwen/Cursor/Copilot formats are unconfirmed. By hand
+  instead: for the other CLIs (Codex, Qwen, ...), the first dashboard start writes ready-to-use copies of the other
+  `windows/*.example.json` files to `windows/generated/` (git-ignored, path already filled in; delete one to
+  regenerate); copy them into those CLIs' own configs. Then run
   `windows/tai.cmd` (`windows/setup-profile.ps1` can add a `tai` command to your PowerShell profile).
 - **Linux / macOS**: install bash 4+, tmux 3+ and jq, edit the `linux/*` settings the same way, then run `linux/tai`.
 
@@ -38,8 +48,13 @@ Licensed under the MIT License (see `LICENSE`).
 - `W` creates a git worktree for the selected project.
 - `T` turns "needs you" toasts on or off. The choice is the file `windows/state/toast.off` and survives restarts;
   waiting states are still recorded while off, so turning toasts back on doesn't replay old prompts.
+- `P` commits all changes (asks for a message), pushes the branch, and offers `gh pr create --fill` when `gh` is installed
+  and you're not on main/master. Credential prompts are disabled, so a missing login fails instead of hanging.
+- `/` finds a project: type to jump to the first name match, `Tab`/Down next, Up previous, `Enter` keep, `Esc` cancel.
+- `V` toggles a live preview under the list. Windows shows the last reply of a Claude session (read from its transcript);
+  Linux shows the last lines of the pane's screen for any CLI. Flag file `preview.on` in the state folder.
 
-The Linux port has the same keys: Shift+Up/Down reorder, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`). They are syntax-checked only (`bash -n`), not yet run on a real machine.
+The Linux port has the same keys: Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`). They are syntax-checked only (`bash -n`), not yet run on a real machine.
 
 ## Shared config
 
