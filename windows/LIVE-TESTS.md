@@ -65,4 +65,5 @@ Tick each box; note anything odd next to it.
 - [ ] `V` toggles the preview under the list; with a Claude session selected it shows the last reply (wrapped, up to 4 rows). Other CLIs show "claude only"; a closed project shows "not open".
 - [ ] `V` state survives a dashboard restart (flag `preview.on`).
 - [ ] `/` find: type part of a project name, the cursor jumps to the match, nothing is hidden, and M/reorder/save still use the full list.
+- [x] `F` on a project with no changes or a short diff: the tab stays open until a key is pressed (confirmed 2026-10-31).
 - [ ] `T` toast toggle and `F` diff / `W` worktree were confirmed live 2026-10-30; no re-test needed.

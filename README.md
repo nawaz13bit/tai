@@ -44,7 +44,7 @@ Licensed under the MIT License (see `LICENSE`).
 - `Shift+Up` / `Shift+Down` reorder the selected project within its agent group; the highlight follows it and the
   order is saved to `projects.json` (entries for the other OS keep their place).
 - `A` add, `D` delete, `G` change agent, `M` + arrow move a pane.
-- `F` opens `git diff HEAD` of the selected project in a new Windows Terminal tab (`windows/diffview.ps1`; `q` closes it).
+- `F` opens `git diff HEAD` of the selected project in a new Windows Terminal tab (`windows/diffview.ps1`; `q` leaves git's pager, then any key closes the tab, so short or empty diffs stay visible).
 - `W` creates a git worktree for the selected project.
 - `T` turns "needs you" toasts on or off. The choice is the file `windows/state/toast.off` and survives restarts;
   waiting states are still recorded while off, so turning toasts back on doesn't replay old prompts.
