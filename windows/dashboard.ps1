@@ -63,11 +63,17 @@ function ResetLine($limit) {
 $script:codexUsage = $null
 $script:codexStamp = [datetime]::MinValue
 $script:codexCtxByDir = @{}
-function Get-CodexUsage {
-    if (((Get-Date) - $script:codexStamp).TotalSeconds -lt 30) { return $script:codexUsage }
-    $script:codexStamp = Get-Date
+$script:codexByHome = @{}   # per CODEX_HOME folder: @{ stamp; usage; ctx }
+# Usage and per-project context of one Codex home (default ~/.codex); each account's folder is scanned and cached separately.
+function Get-CodexUsage($codexHome) {
+    if (-not $codexHome) { $codexHome = Join-Path $env:USERPROFILE '.codex' }
+    $hk = $codexHome.ToLower()
+    $c0 = $script:codexByHome[$hk]
+    if ($c0 -and ((Get-Date) - $c0.stamp).TotalSeconds -lt 30) { $script:codexCtxByDir = $c0.ctx; return $c0.usage }
+    $script:codexUsage = $null
+    $script:codexCtxByDir = @{}
     try {
-        $root = Join-Path $env:USERPROFILE '.codex\sessions'
+        $root = Join-Path $codexHome 'sessions'
         # Logs sit in YYYY\MM\DD folders; look at the newest day folders only (up to 7, stopping at 20 files) so years of
         # history are not listed on every refresh. Falls back to the full scan when the layout is not as expected.
         $cand = @()
@@ -128,6 +134,7 @@ function Get-CodexUsage {
         }
         $script:codexCtxByDir = $byDir
     } catch { }
+    $script:codexByHome[$hk] = @{ stamp = Get-Date; usage = $script:codexUsage; ctx = $script:codexCtxByDir }
     return $script:codexUsage
 }
 
@@ -627,6 +634,13 @@ function Find-Project($projects, $cursor) {
     }
 }
 
+# Config folder of the project's account for an agent, or $null when that agent has no accounts configured.
+function ProjectAcctDir($p, $agent) {
+    if (-not @(Get-AgentAccounts $agent).Count) { return $null }
+    $dir = Get-AccountDir $agent (Get-ProjectAccount $p $agent)
+    if ($dir) { return $dir } else { return $null }
+}
+
 function Draw($projects, $cursor, $message) {
     Refresh-RepoInfo $projects
     $slots = Get-Slots
@@ -637,8 +651,23 @@ function Draw($projects, $cursor, $message) {
     $height = [Console]::WindowHeight - 1
     $lines = @()   # each: text, fg, bg
 
+    # Which account's usage to show per agent: the highlighted project's account when it uses that agent, else the
+    # agent's first (default) account. $acctName is '' when the agent has no accounts configured.
+    $sel = if ($projects.Count) { $projects[$cursor] } else { $null }
+    $acctName = @{}; $acctDir = @{}
+    foreach ($a in 'claude', 'codex') {
+        $acctName[$a] = ''; $acctDir[$a] = $null
+        if (-not @(Get-AgentAccounts $a).Count) { continue }
+        $src = if ($sel -and (Get-Agent $sel) -eq $a) { $sel } else { $projects | Where-Object { (Get-Agent $_) -eq $a } | Select-Object -First 1 }
+        $acctName[$a] = if ($src) { Get-ProjectAccount $src $a } else { @(Get-AgentAccounts $a)[0] }
+        $acctDir[$a] = Get-AccountDir $a $acctName[$a]
+    }
+    $uFile = $usageFile
+    if ($acctDir['claude'] -and -not (Test-DefaultAccountDir 'claude' $acctDir['claude'])) {
+        $uFile = Join-Path $PSScriptRoot ('usage-' + ((Split-Path $acctDir['claude'].TrimEnd('/', '\') -Leaf).ToLower() -replace '[^a-z0-9]', '_') + '.json')
+    }
     $u = $null
-    try { if (Test-Path $usageFile) { $u = Get-Content $usageFile -Raw -ErrorAction Stop | ConvertFrom-Json } } catch { $u = $null }
+    try { if (Test-Path $uFile) { $u = Get-Content $uFile -Raw -ErrorAction Stop | ConvertFrom-Json } } catch { $u = $null }
     # Usage rows shown under each agent's heading: Claude's from usage.json, Codex's from its session logs,
     # agy's lowest model quota from its status line.
     function UsageLinesFor($agent) {
@@ -654,7 +683,7 @@ function Draw($projects, $cursor, $message) {
                 }
             }
             'codex' {
-                $cu = Get-CodexUsage
+                $cu = Get-CodexUsage $acctDir['codex']
                 if ($cu) {
                     foreach ($w in $cu) {
                         $ic = if ($w.label -eq '5h') { $icon.hourly } else { $icon.weekly }
@@ -690,7 +719,8 @@ function Draw($projects, $cursor, $message) {
     # Bottom block: one headed section per agent.
     $usageBlock = @()
     foreach ($a in 'claude', 'codex', 'agy') {
-        $usageBlock += , @("-- $a --", 'Cyan', $null)
+        $hd = if ($acctName[$a] -and @(Get-AgentAccounts $a).Count -gt 1) { "-- $a @$($acctName[$a]) --" } else { "-- $a --" }
+        $usageBlock += , @($hd, 'Cyan', $null)
         foreach ($ul in (UsageLinesFor $a)) { $usageBlock += , $ul }
     }
 
@@ -788,6 +818,8 @@ function Draw($projects, $cursor, $message) {
         # An agent that reports nothing (agy/Codex without their hooks set up) just shows running.
         if ($slot -and $agent -ne 'claude' -and $state -eq 'starting') { $state = 'running'; $fg = 'Green' }
         $tag = if ($agent -eq 'claude') { '' } else { " ($agent)" }
+        # Account name, only for agents that have more than one account in accounts.json.
+        if (@(Get-AgentAccounts $agent).Count -gt 1) { $tag += " @$(Get-ProjectAccount $p $agent)" }
         # Agents without a model/context block have no third row for the shell count, so it goes on the main row.
         $subN = Get-SubCount $p $slot
         $rowShells = if ($slot -and -not (HasInfo $i) -and $shells[[int]$slot.slot]) { " $($icon.shell) $($shells[[int]$slot.slot]) sh" } else { '' }
@@ -803,7 +835,7 @@ function Draw($projects, $cursor, $message) {
             if ($st -and $st.effort) { $m += "  $($icon.effort) $($st.effort)" }
             $lines += , @("    $m", 'Gray', $bg)
             # Codex has no ctx in its state file: take it from the project's newest rollout log.
-            $cv = if ($st -and $null -ne $st.ctx) { $st.ctx } elseif ($agent -eq 'codex') { [void](Get-CodexUsage); $script:codexCtxByDir[(Get-NormPath $p.path)] } else { $null }
+            $cv = if ($st -and $null -ne $st.ctx) { $st.ctx } elseif ($agent -eq 'codex') { [void](Get-CodexUsage (ProjectAcctDir $p 'codex')); $script:codexCtxByDir[(Get-NormPath $p.path)] } else { $null }
             $c = "$($icon.ctx) " + $(if ($null -ne $cv) { '{0:N0}%' -f $cv } else { '--' })
             $sh = if ($shells[[int]$slot.slot]) { "  $($icon.shell) $($shells[[int]$slot.slot]) sh" } else { '' }
             $sh += $subText
@@ -834,6 +866,24 @@ function Draw($projects, $cursor, $message) {
         } else {
             $bottom += , @('Enter: open in a free pane', 'Gray', $null)
         }
+        # Login behind this project's account: real email/plan, not just the label from accounts.json.
+        $selAgent = Get-Agent $p
+        $selSlot = $slots[(Get-NormPath $p.path)]
+        if ($selSlot -and $selSlot.agent) { $selAgent = Get-Agent $selSlot }
+        $accNames = @(Get-AgentAccounts $selAgent)
+        if ($accNames.Count) {
+            $acc = Get-ProjectAccount $p $selAgent
+            $who = Get-AccountIdentity $selAgent $acc
+            $color = 'Gray'
+            if ($who -eq 'not logged in') { $who += ' (the CLI will ask to sign in)'; $color = 'Yellow' }
+            else {
+                # Two accounts of one CLI that are the same login are almost always a setup mistake.
+                foreach ($other in $accNames) {
+                    if ($other -ne $acc -and (Get-AccountIdentity $selAgent $other) -eq (Get-AccountIdentity $selAgent $acc) -and $who -ne 'checking...') { $who += "  = same as '$other'!"; $color = 'Yellow'; break }
+                }
+            }
+            $bottom += , @("$selAgent @${acc}: $who", $color, $null)
+        }
     }
     $bottom += , @($message, 'Yellow', $null)
     foreach ($pr in $previewRows) { $bottom += , $pr }
@@ -841,7 +891,7 @@ function Draw($projects, $cursor, $message) {
     # One status line on the last row: keys, then the git/compact symbol legend (cut off by width if needed).
     $bottom += , @('-- keys --', 'Cyan', $null)
     $bottom += , @('Enter open  M move  R sync  X close', 'Gray', $null)
-    $bottom += , @('D del A add G agent F diff W tree H hooks', 'Gray', $null)
+    $bottom += , @('D del A add G agent U account F diff W tree H hooks', 'Gray', $null)
     $bottom += , @("Shift+Up/Down reorder  T toast $(if (Test-Path $script:toastOff) { 'off' } else { 'on' })", 'Gray', $null)
     $bottom += , @("P push/PR  / find  V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })", 'Gray', $null)
     $bottom += , @("$($icon.changed)n changed $($icon.ahead)push $($icon.behind)pull $($icon.wtree)wt=worktree", 'DarkGray', $null)
@@ -1083,6 +1133,21 @@ while ($true) {
                         Save-Projects $projects
                         $message = "$($p.name) will run $next"
                         $follow = $p.name   # the project moves to another group; keep the cursor on it
+                    }
+                }
+            }
+            'U' {
+                if ($projects.Count) {
+                    $p = $projects[$cursor]
+                    $agent = Get-Agent $p
+                    $names = @(Get-AgentAccounts $agent)
+                    if ((Get-Slots).ContainsKey((Get-NormPath $p.path))) { $message = "Close $($p.name) first (X) to change its account" }
+                    elseif ($names.Count -lt 2) { $message = "No accounts for $agent in accounts.json (see accounts.example.json)" }
+                    else {
+                        $next = $names[([array]::IndexOf($names, (Get-ProjectAccount $p $agent)) + 1) % $names.Count]
+                        Set-ProjectAccount $p.path $agent $next
+                        $projects = @(Get-Projects)
+                        $message = "$($p.name) will use $agent account '$next'"
                     }
                 }
             }

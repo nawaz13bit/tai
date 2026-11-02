@@ -1,0 +1,10 @@
+{
+  "claude": {
+    "personal": "~/.claude",
+    "work": "~/.claude-work"
+  },
+  "codex": {
+    "personal": "~/.codex",
+    "work": "~/.codex-work"
+  }
+}

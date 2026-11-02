@@ -43,7 +43,7 @@ Licensed under the MIT License (see `LICENSE`).
 - `Enter` opens the selected project; `Up` / `Down` move the highlight.
 - `Shift+Up` / `Shift+Down` reorder the selected project within its agent group; the highlight follows it and the
   order is saved to `projects.json` (entries for the other OS keep their place).
-- `A` add, `D` delete, `G` change agent, `M` + arrow move a pane.
+- `A` add, `D` delete, `G` change agent, `U` change account (closed projects only; see Accounts), `M` + arrow move a pane.
 - `F` opens `git diff HEAD` of the selected project in a new Windows Terminal tab (`windows/diffview.ps1`; `q` leaves git's pager, then any key closes the tab, so short or empty diffs stay visible).
 - `W` creates a git worktree for the selected project.
 - `T` turns "needs you" toasts on or off. The choice is the file `windows/state/toast.off` and survives restarts;
@@ -55,6 +55,26 @@ Licensed under the MIT License (see `LICENSE`).
   Linux shows the last lines of the pane's screen for any CLI. Flag file `preview.on` in the state folder.
 
 The Linux port has the same keys: Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`). They are syntax-checked only (`bash -n`), not yet run on a real machine.
+
+## Accounts (Windows; Claude and Codex only)
+
+Copy `accounts.example.json` to `accounts.json` (git-ignored) and list named accounts per CLI as config folders, e.g.
+`"claude": {"personal": "~/.claude", "work": "~/.claude-work"}`. The first is the default. A CLI keeps its login in its
+config folder, so a pane on another account just gets `CLAUDE_CONFIG_DIR` / `CODEX_HOME` (the `configEnv` entry in
+`agents.json`) pointed at that folder; the CLI's own default folder (`defaultDir`) is left unset.
+
+- `U` cycles the selected closed project's account; it is saved per agent in `projects.json` (`"accounts": {"claude": "work"}`).
+  Rows show `@work` for agents with 2+ accounts. Reopen the project to use it.
+- The detail block shows the real login (`claude @work: me@x.com (pro)`), read via `claude auth status` (background, cached
+  10 min) or from Codex's `auth.json` (email and plan only). It warns on `not logged in` and on two accounts that are the same login.
+- A new account's folder is created on first launch and the CLI asks you to sign in once. A new Codex folder gets a copy of
+  `~/.codex/hooks.json` and `config.toml` (Codex may ask to trust the hooks again); Claude gets its hooks via `--settings`.
+- Usage bars follow the highlighted project's account (header `-- claude @work --`; otherwise the agent's first account).
+  Claude panes on a non-default account write `windows/usage-<folder>.json` (from `CLAUDE_CONFIG_DIR`); Codex usage is
+  read from that account's `<CODEX_HOME>\sessions`.
+- **agy has no accounts**: it has no config-folder flag or variable, and per its community docs the Google login sits in the
+  OS keyring (global on Windows), so a per-pane account can't be selected. Not wired (unverified here).
+- Not done: other CLIs have no `configEnv`; Linux port untouched.
 
 ## Shared config
 

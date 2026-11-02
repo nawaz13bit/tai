@@ -67,7 +67,10 @@ if ($data.rate_limits) {
         five_hour = $data.rate_limits.five_hour
         seven_day = $data.rate_limits.seven_day
     } | ConvertTo-Json -Depth 5
-    try { Write-Atomic (Join-Path $PSScriptRoot 'usage.json') $usage } catch { }
+    # A pane on another account (CLAUDE_CONFIG_DIR set by tai) writes its own file, so accounts don't overwrite each other.
+    $usageName = 'usage.json'
+    if ($env:CLAUDE_CONFIG_DIR) { $usageName = 'usage-' + ((Split-Path $env:CLAUDE_CONFIG_DIR.TrimEnd('/', '\') -Leaf).ToLower() -replace '[^a-z0-9]', '_') + '.json' }
+    try { Write-Atomic (Join-Path $PSScriptRoot $usageName) $usage } catch { }
 }
 
 # Model and effort are shown in the dashboard's project pane, so the line is the folder, context and compaction.

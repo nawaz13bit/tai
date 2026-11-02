@@ -96,6 +96,10 @@ while ($true) {
             $clock = [Diagnostics.Stopwatch]::StartNew()
             Clear-AgentEnv
             Set-AgentEnv $agent
+            # Account of this project for this agent (accounts.json); read again each launch so U + restart picks it up.
+            $proj = @(Get-Projects) | Where-Object { (Get-NormPath $_.path) -eq (Get-NormPath $job.path) } | Select-Object -First 1
+            $account = if ($proj) { Get-ProjectAccount $proj $agent } else { '' }
+            Set-AgentAccountEnv $agent $account
             $exe = Get-AgentExe $agent
             $sflag = @(if (Get-AgentSettingsFlag $agent) { Get-AgentSettingsFlag $agent; $settings })
             $argv = @(Get-AgentArgs $agent 'resume' $job.name) + $sflag

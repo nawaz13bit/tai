@@ -3,10 +3,14 @@
     "exe": "claude",
     "resume": ["--continue", "--remote-control", "{name}"],
     "fresh": ["--remote-control", "{name}"],
-    "settingsFlag": "--settings"
+    "settingsFlag": "--settings",
+    "configEnv": "CLAUDE_CONFIG_DIR",
+    "defaultDir": "~/.claude"
   },
   "codex": {
     "exe": "codex",
+    "configEnv": "CODEX_HOME",
+    "defaultDir": "~/.codex",
     "args": ["--no-alt-screen"],
     "resume": ["resume", "--last"]
   },

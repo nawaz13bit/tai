@@ -741,7 +741,130 @@ function Clear-AgentEnv {
     foreach ($n in $script:agents) {
         $r = (Get-Registry).$n
         if ($r -and $r.env) { foreach ($p in $r.env.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, $null, 'Process') } }
+        if ($r -and $r.configEnv) { [Environment]::SetEnvironmentVariable([string]$r.configEnv, $null, 'Process') }
     }
+}
+
+# ---- Accounts -------------------------------------------------------------------------------------------------
+# accounts.json (repo root, git-ignored; see accounts.example.json) lists named accounts per CLI as config folders:
+#   { "claude": { "personal": "~/.claude", "work": "~/.claude-work" } }
+# The first one is the default. A CLI keeps its login inside its config folder, and agents.json's "configEnv" names the
+# variable that moves it (CLAUDE_CONFIG_DIR, CODEX_HOME), so a pane on another account just gets another folder.
+$script:accountsPath = Join-Path (Split-Path $PSScriptRoot) 'accounts.json'
+
+# Account names of an agent, in file order (empty when the agent has no accounts or no configEnv).
+function Get-AgentAccounts($agent) {
+    if (-not (Get-Registry).$agent.configEnv) { return @() }
+    try {
+        $a = (Get-Content $script:accountsPath -Raw -ErrorAction Stop | ConvertFrom-Json).$agent
+        if ($a) { return @($a.PSObject.Properties.Name) }
+    } catch { }
+    return @()
+}
+
+# The project's account for an agent: its saved choice when that account still exists, else the first account.
+function Get-ProjectAccount($project, $agent) {
+    $names = @(Get-AgentAccounts $agent)
+    if (-not $names.Count) { return '' }
+    $saved = $project.accounts.$agent
+    if ($saved -and $names -contains $saved) { return [string]$saved }
+    return $names[0]
+}
+
+function Get-AccountDir($agent, $account) {
+    try {
+        $d = [string](Get-Content $script:accountsPath -Raw -ErrorAction Stop | ConvertFrom-Json).$agent.$account
+        if ($d) { return [Environment]::ExpandEnvironmentVariables($d.Replace('~', $HOME)) }
+    } catch { }
+    return $null
+}
+
+function Test-DefaultAccountDir($agent, $dir) {
+    $d = [string](Get-Registry).$agent.defaultDir
+    if (-not $d) { return $false }
+    $d = $d.Replace('~', $HOME)
+    return (Get-NormPath $d) -eq (Get-NormPath $dir)
+}
+
+# Who an account is logged in as: 'email (plan)', 'not logged in', or 'checking...' while a lookup runs.
+# Claude is asked through `claude auth status` in a background job (cached 10 min); Codex is read from auth.json
+# (only the email and plan claims of the id token are used, never the tokens themselves).
+$script:identityCache = @{}
+function Get-AccountIdentity($agent, $account) {
+    $dir = Get-AccountDir $agent $account
+    if (-not $dir) { return '' }
+    if ($agent -eq 'codex') {
+        try {
+            $auth = Join-Path $dir 'auth.json'
+            if (-not (Test-Path -LiteralPath $auth)) { return 'not logged in' }
+            $p = ((Get-Content -LiteralPath $auth -Raw | ConvertFrom-Json).tokens.id_token.Split('.')[1]).Replace('-', '+').Replace('_', '/')
+            while ($p.Length % 4) { $p += '=' }
+            $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+            $plan = $c.'https://api.openai.com/auth'.chatgpt_plan_type
+            if (-not $c.email) { return 'not logged in' }
+            return $(if ($plan) { "$($c.email) ($plan)" } else { [string]$c.email })
+        } catch { return 'not logged in' }
+    }
+    if ($agent -ne 'claude') { return '' }
+    $key = "$agent|$dir"
+    $c = $script:identityCache[$key]
+    if (-not $c) { $c = @{ time = [datetime]::MinValue; text = $null; job = $null }; $script:identityCache[$key] = $c }
+    if ($c.job -and $c.job.State -ne 'Running') {
+        $out = (@(Receive-Job $c.job -ErrorAction SilentlyContinue) -join "`n")
+        Remove-Job $c.job -Force
+        $c.job = $null
+        $c.time = Get-Date
+        try {
+            $s = $out | ConvertFrom-Json
+            $c.text = if ($s.loggedIn -and $s.email) { if ($s.subscriptionType) { "$($s.email) ($($s.subscriptionType))" } else { [string]$s.email } } else { 'not logged in' }
+        } catch { $c.text = 'login unknown (claude auth status failed)' }
+    } elseif ($c.job -and ((Get-Date) - $c.time).TotalSeconds -gt 30) {
+        Stop-Job $c.job -ErrorAction SilentlyContinue; Remove-Job $c.job -Force -ErrorAction SilentlyContinue; $c.job = $null
+    }
+    if (-not $c.job -and ((Get-Date) - $c.time).TotalSeconds -ge 600) {
+        $c.time = Get-Date
+        $useDir = if (Test-DefaultAccountDir $agent $dir) { '' } else { $dir }
+        $c.job = Start-Job -ArgumentList $useDir -ScriptBlock {
+            param($d)
+            if ($d) { $env:CLAUDE_CONFIG_DIR = $d }
+            claude auth status 2>$null
+        }
+    }
+    if ($c.text) { return $c.text }
+    return 'checking...'
+}
+
+# Points the agent's config variable at the account's folder (created on first use). Codex also gets the dashboard's
+# hooks copied in once; Claude needs nothing because slot.ps1 passes its hooks with --settings.
+function Set-AgentAccountEnv($agent, $account) {
+    if (-not $account) { return }
+    $var = [string](Get-Registry).$agent.configEnv
+    $dir = Get-AccountDir $agent $account
+    if (-not $var -or -not $dir) { return }
+    # The CLI's own default folder: leave the variable unset (Claude keeps its config next to ~/.claude, not inside it).
+    if (Test-DefaultAccountDir $agent $dir) { return }
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        if ($agent -eq 'codex') {
+            foreach ($f in 'hooks.json', 'config.toml') {
+                $src = Join-Path (Join-Path $HOME '.codex') $f
+                if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $dir }
+            }
+        }
+    }
+    [Environment]::SetEnvironmentVariable($var, $dir, 'Process')
+}
+
+# Saves the project's account for one agent (projects.json: "accounts": { "claude": "work" }).
+function Set-ProjectAccount($path, $agent, $account) {
+    $projects = @(Get-Projects)
+    $p = $projects | Where-Object { (Get-NormPath $_.path) -eq (Get-NormPath $path) } | Select-Object -First 1
+    if (-not $p) { return }
+    $map = [ordered]@{}
+    if ($p.accounts) { foreach ($x in $p.accounts.PSObject.Properties) { $map[$x.Name] = $x.Value } }
+    $map[$agent] = $account
+    $p | Add-Member -NotePropertyName accounts -NotePropertyValue ([pscustomobject]$map) -Force
+    Save-Projects $projects
 }
 
 # The known CLIs that are installed right now (all of them when none is found, so the menus never end up empty).

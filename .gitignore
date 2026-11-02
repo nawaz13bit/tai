@@ -6,6 +6,9 @@ windows/generated/
 # Runtime data
 state/
 usage.json
+usage-*.json
+usage-*.json.*.tmp
+accounts.json
 usage.json.*.tmp
 *.log
 *.alive
