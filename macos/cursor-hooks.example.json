@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{ "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }],
+    "preToolUse": [{ "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }],
+    "stop": [{ "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }],
+    "sessionEnd": [{ "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }]
+  }
+}

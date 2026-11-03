@@ -2,6 +2,7 @@
 # Enter focuses the project's pane, or opens it in the first free pane.
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
+Protect-Tai   # higher priority + resident memory for the dashboard and its terminal window
 $stateDir = Join-Path $PSScriptRoot 'state'
 $usageFile = Join-Path $PSScriptRoot 'usage.json'
 $alive = Join-Path $stateDir 'dashboard.alive'
@@ -757,7 +758,8 @@ function Draw($projects, $cursor, $message) {
         return [bool]($t -and $t.agent -eq $a -and $t.model)
     }
     function RowHeight($i) {
-        $rows = if (HasInfo $i) { 4 } else { 2 }   # main row, optional model/context rows, repo row
+        $rows = if (HasInfo $i) { 3 } else { 1 }   # main row, optional model/context rows
+        if (Get-RepoLine $projects[$i].path) { $rows += 1 }   # repo row, only for git folders
         if (IsGroupStart $i) { $rows += 1 }   # agent heading
         $rows
     }
@@ -847,7 +849,7 @@ function Draw($projects, $cursor, $message) {
             }
         }
         $repo = Get-RepoLine $p.path
-        $lines += , @($(if ($repo) { "    $repo" } else { '' }), $(if ($i -eq $cursor) { 'Gray' } else { 'DarkGray' }), $bg)   # dim grey is unreadable on the highlight
+        if ($repo) { $lines += , @("    $repo", $(if ($i -eq $cursor) { 'Gray' } else { 'DarkGray' }), $bg) }   # no git repo: no row (dim grey is unreadable on the highlight)
     }
     if ($projects.Count -eq 0) { $lines += , @('(no projects - press A)', 'DarkGray', $null) }
 

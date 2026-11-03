@@ -241,14 +241,60 @@ usage_section() {   # name; lines go to USAGE, a header only when there are any
     USAGE=("${USAGE[@]:0:$2}" "$C_HEAD-- $name --$C_RST" "${sub[@]}")
 }
 
+# Which account's usage to show per agent: the highlighted project's account when it uses that agent, else the agent's
+# first account. ACC_NAME / ACC_DIR stay empty for an agent without accounts; ACC_TAG is " @name" only when it has several.
+declare -A ACC_NAME ACC_DIR ACC_TAG
+pick_accounts() {
+    local a i src="" sa="" names
+    ACC_NAME=() ACC_DIR=() ACC_TAG=()
+    ((${#order[@]})) && sa="${agents[${order[sel]}]/#-/claude}"
+    for a in claude codex; do
+        names="$(agent_accounts "$a")"
+        [[ -n "$names" ]] || continue
+        src=""
+        if [[ "$sa" == "$a" ]]; then src=${paths[${order[sel]}]}
+        else for i in "${!paths[@]}"; do [[ "${agents[i]/#-/claude}" == "$a" ]] && { src=${paths[i]}; break; }; done; fi
+        if [[ -n "$src" ]]; then ACC_NAME[$a]="$(project_account "$src" "$a")"; else ACC_NAME[$a]="$(head -n1 <<< "$names")"; fi
+        ACC_DIR[$a]="$(account_dir "$a" "${ACC_NAME[$a]}")"
+        (($(wc -l <<< "$names") > 1)) && ACC_TAG[$a]=" @${ACC_NAME[$a]}"
+    done
+}
+
+# Login behind the highlighted project's account (real email/plan, not just the accounts.json label), cached in IDENT.
+IDENT="" IDENT_COL=""
+ident_update() {
+    local c a names acc who mine o
+    IDENT="" IDENT_COL=$C_DIM
+    ((${#order[@]})) || return 0
+    c=${order[sel]}; a="${agents[c]/#-/claude}"
+    names="$(agent_accounts "$a")"
+    [[ -n "$names" ]] || return 0
+    acc="$(project_account "${paths[c]}" "$a")"
+    who="$(account_identity "$a" "$acc")"
+    [[ -n "$who" ]] || return 0
+    if [[ "$who" == "not logged in" ]]; then who+=" (the CLI will ask to sign in)"; IDENT_COL=$C_WORK
+    elif [[ "$who" != "checking..." ]]; then
+        mine="$(account_identity "$a" "$acc")"
+        while IFS= read -r o; do   # two accounts of one CLI that are the same login are almost always a setup mistake
+            [[ "$o" != "$acc" && "$(account_identity "$a" "$o")" == "$mine" ]] && { who+="  = same as '$o'!"; IDENT_COL=$C_WORK; break; }
+        done <<< "$names"
+    fi
+    IDENT="$a @$acc: $who"
+}
+
 usage_refresh() {
     last_usage=$now
     USAGE=()
-    local u=() pct rs lbl i start f w mins k files=() q
+    local u=() pct rs lbl i start f w mins k files=() q ufile="$USAGE_FILE" cdir="$HOME/.codex"
+    pick_accounts
+    if [[ -n "${ACC_DIR[claude]:-}" ]] && ! is_default_account_dir claude "${ACC_DIR[claude]}"; then
+        ufile="$TAI_CONF/$(usage_name_for_dir "${ACC_DIR[claude]}")"
+    fi
+    [[ -n "${ACC_DIR[codex]:-}" ]] && cdir="${ACC_DIR[codex]}"
     # Claude: 5h / 7d windows from the status line's rate_limits
     start=${#USAGE[@]}
-    if [[ -f "$USAGE_FILE" ]]; then
-        mapfile -t u < <(jq -r '(.five_hour, .seven_day) | if . == null then "- -" else "\(.used_percentage // 0 | round) \(.resets_at // "-")" end' "$USAGE_FILE" 2>/dev/null)
+    if [[ -f "$ufile" ]]; then
+        mapfile -t u < <(jq -r '(.five_hour, .seven_day) | if . == null then "- -" else "\(.used_percentage // 0 | round) \(.resets_at // "-")" end' "$ufile" 2>/dev/null)
         lbl=(5h 7d)
         for i in 0 1; do
             read -r pct rs <<< "${u[i]:-- -}"
@@ -261,12 +307,12 @@ usage_refresh() {
             fi
         done
     fi
-    usage_section claude "$start"
+    usage_section "claude${ACC_TAG[claude]:-}" "$start"
 
     # Codex: newest rollout files carry the account's rate limits (windows labelled by length)
     start=${#USAGE[@]}
-    if [[ -d "$HOME/.codex/sessions" ]]; then
-        mapfile -t files < <(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -print0 2>/dev/null | xargs -r -0 ls -t 2>/dev/null | head -n 5)
+    if [[ -d "$cdir/sessions" ]]; then
+        mapfile -t files < <(find "$cdir/sessions" -name 'rollout-*.jsonl' -print0 2>/dev/null | xargs -r -0 ls -t 2>/dev/null | head -n 5)
         for f in "${files[@]}"; do
             mapfile -t w < <(tail -c 400000 "$f" 2>/dev/null | grep '"rate_limits"' | tail -n 1 |
                 jq -r '(.payload.rate_limits // .rate_limits // empty) | [.primary, .secondary][] | select(. != null) | "\(.used_percent // 0 | round) \(.window_minutes // 0) \(.resets_at // 0)"' 2>/dev/null)
@@ -280,16 +326,17 @@ usage_refresh() {
             break
         done
     fi
-    usage_section codex "$start"
+    usage_section "codex${ACC_TAG[codex]:-}" "$start"
 
     # agy: per-model quota left, lowest across the running sessions
     start=${#USAGE[@]}
-    mapfile -t q < <(jq -rs '[.[] | select(.agent == "agy" and ((now - (.updated_epoch // 0)) < 86400)) | .quotas[]?]
+    mapfile -t q < <(jq -rs '[.[] | select(type == "object" and .agent == "agy" and ((now - (.updated_epoch // 0)) < 86400)) | .quotas[]?]
                              | group_by(.name)[] | "\(.[0].name)\t\(map(.left) | min | round)"' "$STATE_DIR"/*.json 2>/dev/null)
     for k in "${q[@]}"; do
         [[ -n "$k" ]] && bar_line "${k%%$'\t'*}" "$((100 - ${k#*$'\t'}))"
     done
     usage_section agy "$start"
+    ident_update
 }
 
 # --- status of one project pane --------------------------------------------------------------------------
@@ -393,7 +440,9 @@ render() {
         [[ -n "${P_pid[$selp]:-}" ]] && hint="Enter focus  X close"
     fi
     ((${#selp} > W - 2)) && selp="…${selp: -$((W - 3))}"
-    core+=("$C_DIM$SEP$C_RST" "$C_DIM$selp$C_RST" "$C_DIM$hint$C_RST" "$C_WORK${MSG:0:$((W - 1))}$C_RST")
+    core+=("$C_DIM$SEP$C_RST" "$C_DIM$selp$C_RST" "$C_DIM$hint$C_RST")
+    [[ -n "$IDENT" ]] && core+=("$IDENT_COL${IDENT:0:$((W - 1))}$C_RST")   # who the selected project's account is logged in as
+    core+=("$C_WORK${MSG:0:$((W - 1))}$C_RST")
     # V: the last lines of the selected pane's screen (tmux capture-pane), any CLI.
     if [[ -e "$PREVIEW_ON" && -n "$selp" ]]; then
         local pid_=${P_id[${paths[${order[sel]}]}]:-} pl
@@ -409,7 +458,7 @@ render() {
            "$C_DIM D remove  A add  G cli$C_RST"
            "$C_DIM⇧↑↓ reorder  F diff  W tree$C_RST"
            "$C_DIM P push/PR  / find  V view$C_RST"
-           "$C_DIM T toasts  M+arrow move  Q quit$C_RST"
+           "$C_DIM T toasts  U account  H hooks  M+arrow move  Q quit$C_RST"
            "$C_DIM◐ work  ! wait  ✓ done  ○ idle$C_RST"
            "$C_DIM▶ shells  ◈ sub-agents  Alt+D$C_RST")
     local room=$((H - 6))
@@ -612,8 +661,13 @@ gather
 restore_session
 gather
 usage_refresh
+if [[ -n "$(hooks_pending)" ]]; then MSG="Press H to install status hooks for: $(hooks_pending | tr '\n' ' ')"; fi
 
+last_sig=""
 while true; do
+    # The usage bars and login line follow the highlighted project's account, so refresh them when the highlight moves.
+    sig="${order[sel]:-}|${paths[${order[sel]:-0}]:-}|${agents[${order[sel]:-0}]:-}"
+    if [[ "$sig" != "$last_sig" ]]; then [[ -n "$last_sig" ]] && usage_refresh; last_sig="$sig"; fi
     render
     if read_key; then
         n=${#order[@]}
@@ -637,6 +691,14 @@ while true; do
             p|P)
                 ((n)) || continue
                 publish_flow "${names[cur]}" "${paths[cur]}"
+                printf '\e[?25l'; FULL=1 ;;
+            r|R)   # tmux layout is always live; this just forces a fresh scan of panes, state and usage
+                load; gather; usage_refresh; FULL=1; MSG="Refreshed" ;;
+            h|H)
+                printf '\e[H\e[2J\e[?25h\e[1mInstall tai status hooks\e[0m\n'
+                pend=(); while IFS= read -r a; do [[ -n "$a" ]] && pend+=("$a"); done < <(hooks_pending)
+                ((${#pend[@]})) || pend=("${HOOK_AGENTS[@]}")   # nothing new: offer every target again
+                install_agent_hooks "${pend[@]}"
                 printf '\e[?25l'; FULL=1 ;;
             v|V)
                 if [[ -e "$PREVIEW_ON" ]]; then rm -f "$PREVIEW_ON"; MSG="Preview off"
@@ -681,6 +743,19 @@ while true; do
                     a="$(choose_agent)"
                     if [[ -n "$a" ]]; then set_agent "${paths[cur]}" "$a"; MSG="${names[cur]} -> $a"; load
                     else MSG="Cancelled"; fi
+                fi ;;
+            u|U)
+                ((n)) || continue
+                a="${agents[cur]/#-/claude}"
+                mapfile -t accts < <(agent_accounts "$a")
+                if [[ -n "$(pane_for_path "${paths[cur]}")" ]]; then MSG="Close ${names[cur]} first (X) to change its account"
+                elif ((${#accts[@]} < 2)); then MSG="No accounts for $a in accounts.json (see accounts.example.json)"
+                else
+                    cura="$(project_account "${paths[cur]}" "$a")"; nexta="${accts[0]}"
+                    for ai in "${!accts[@]}"; do [[ "${accts[ai]}" == "$cura" ]] && nexta="${accts[(ai + 1) % ${#accts[@]}]}"; done
+                    set_project_account "${paths[cur]}" "$a" "$nexta"
+                    usage_refresh
+                    MSG="${names[cur]} will use $a account '$nexta'"
                 fi ;;
             m|M)
                 ((n)) || continue

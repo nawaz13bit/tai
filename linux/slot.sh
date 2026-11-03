@@ -6,7 +6,7 @@
 
 name="$1" path="$2" agent="${3:--}"
 [[ "$agent" == "-" ]] && agent=claude
-cd "$path" || exit 1
+cd "$path" 2>/dev/null || { echo "Folder not found: $path"; sleep 4; exit 1; }   # say why the pane closes
 update_installed
 
 export TAI_PROJECT_DIR="$path"
@@ -21,8 +21,16 @@ trap 'exit 0' HUP TERM
 
 start_agent() {   # resume|fresh
     agent_env "$agent"
+    set_agent_account_env "$agent" "$(project_account "$path" "$agent")"   # read each launch, so U + restart picks it up
     agent_args "$agent" "$1" "$name"   # fills ARGV from agents.json (the Claude --settings flag is Windows-only)
-    "$(agent_exe "$agent")" "${ARGV[@]}"
+    # Agents run slightly niced so the dashboard, tmux and the terminal stay responsive when the machine is busy
+    # (raising the UI's own priority needs root). TAI_AGENT_NICE=0 turns it off; the default is 5.
+    local n="${TAI_AGENT_NICE:-5}"
+    if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] && command -v nice >/dev/null 2>&1; then
+        nice -n "$n" "$(agent_exe "$agent")" "${ARGV[@]}"
+    else
+        "$(agent_exe "$agent")" "${ARGV[@]}"
+    fi
 }
 
 # Chosen CLI not installed: use the first one that is (the saved choice stays unchanged).
@@ -47,7 +55,7 @@ read_key() {
     else KEY="$k"; fi
 }
 
-# Menu shown when the CLI ended by itself. Prints the chosen action: restart, switch:<cli> or close.
+# Menu shown when the CLI ended by itself. Sets ACTION: restart, switch:<cli> or close.
 exit_menu() {
     local choices=("Restart $agent") acts=(restart) a idx=0 n
     for a in "${AGENTS[@]}"; do
@@ -61,13 +69,13 @@ exit_menu() {
             if ((n == idx)); then printf '\e[7m> %s\e[0m\n' "${choices[n]}"; else printf '  %s\n' "${choices[n]}"; fi
         done
         printf '\e[90mUp/Down + Enter, or 1-%d. Esc or 3 s idle: close pane\e[0m\n' "${#choices[@]}"
-        read_key || { echo close; return; }
+        read_key || { ACTION=close; return; }
         case "$KEY" in
             up)    idx=$(((idx + ${#choices[@]} - 1) % ${#choices[@]})) ;;
             down)  idx=$(((idx + 1) % ${#choices[@]})) ;;
-            enter) echo "${acts[idx]}"; return ;;
-            [1-9]) ((KEY <= ${#choices[@]})) && { echo "${acts[KEY - 1]}"; return; } ;;
-            *)     echo close; return ;;
+            enter) ACTION="${acts[idx]}"; return ;;
+            [1-9]) if ((KEY <= ${#choices[@]})); then ACTION="${acts[KEY - 1]}"; return; fi ;;
+            *)     ACTION=close; return ;;
         esac
     done
 }
@@ -83,11 +91,11 @@ while true; do
         echo "No earlier conversation to continue (or it failed to load) - starting a new one."
         start_agent fresh
     fi
-    action="$(exit_menu)"
-    case "$action" in
+    exit_menu   # sets ACTION (not captured with $(...), which would hide the menu)
+    case "$ACTION" in
         restart) ;;
         switch:*)
-            agent="${action#switch:}"; set_agent "$path" "$agent"
+            agent="${ACTION#switch:}"; set_agent "$path" "$agent"
             tmux set-option -p -t "$TMUX_PANE" @tai_agent "$agent" 2>/dev/null
             tmux set-option -p -t "$TMUX_PANE" @tai_since "$(date +%s)" 2>/dev/null ;;
         *) exit 0 ;;

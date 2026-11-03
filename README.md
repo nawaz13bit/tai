@@ -3,6 +3,8 @@
 One terminal window with a project dashboard and several Claude Code panes.
 
 - `windows/` — PowerShell + Windows Terminal version (entry point `windows/tai.ps1` / `windows/tai.cmd`).
+- `macos/` — zsh + tmux port (entry point `macos/tai`; built-in zsh, `brew install tmux jq`). Same features as Linux,
+  with BSD tools and `osascript` toasts. Written without access to a Mac: not yet run. See `macos/README.md`.
 - `linux/` — Bash + tmux port (entry point `linux/tai`; needs bash 4+, tmux 3+, jq). Same features as the Windows
   version: hook-driven working / waiting / done states, sub-agent and shell counts, model / effort / ctx / compact,
   git and GitHub row, Claude / Codex / agy usage bars, pinned keys block, session restore and pane move (M + arrow).
@@ -34,7 +36,8 @@ Windows hook/statusline settings reference `windows/*.ps1` by absolute path.
   `windows/*.example.json` files to `windows/generated/` (git-ignored, path already filled in; delete one to
   regenerate); copy them into those CLIs' own configs. Then run
   `windows/tai.cmd` (`windows/setup-profile.ps1` can add a `tai` command to your PowerShell profile).
-- **Linux / macOS**: install bash 4+, tmux 3+ and jq, edit the `linux/*` settings the same way, then run `linux/tai`.
+- **Linux**: install bash 4+, tmux 3+ and jq, edit the `linux/*` settings the same way, then run `linux/tai`.
+- **macOS**: `brew install tmux jq`, edit the `macos/*` settings the same way, `chmod +x macos/tai`, then run `macos/tai`.
 
 Licensed under the MIT License (see `LICENSE`).
 
@@ -54,9 +57,9 @@ Licensed under the MIT License (see `LICENSE`).
 - `V` toggles a live preview under the list. Windows shows the last reply of a Claude session (read from its transcript);
   Linux shows the last lines of the pane's screen for any CLI. Flag file `preview.on` in the state folder.
 
-The Linux port has the same keys: Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`). They are syntax-checked only (`bash -n`), not yet run on a real machine.
+The Linux and macOS ports have the same keys (macOS is zsh, checked with `zsh -n` only once run on a Mac; until then unchecked): Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`), `U` (account, see Accounts), `H` (hook installer, same as Windows; files in `generated/`, answers in `state/hooks-install.json`), `R` (reload config and refresh usage). Agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off). They are syntax-checked only (`bash -n`), not yet run on a real machine.
 
-## Accounts (Windows; Claude and Codex only)
+## Accounts (Windows, Linux, macOS; Claude and Codex only)
 
 Copy `accounts.example.json` to `accounts.json` (git-ignored) and list named accounts per CLI as config folders, e.g.
 `"claude": {"personal": "~/.claude", "work": "~/.claude-work"}`. The first is the default. A CLI keeps its login in its
@@ -74,7 +77,10 @@ config folder, so a pane on another account just gets `CLAUDE_CONFIG_DIR` / `COD
   read from that account's `<CODEX_HOME>\sessions`.
 - **agy has no accounts**: it has no config-folder flag or variable, and per its community docs the Google login sits in the
   OS keyring (global on Windows), so a per-pane account can't be selected. Not wired (unverified here).
-- Not done: other CLIs have no `configEnv`; Linux port untouched.
+- On Linux and macOS the per-account usage file is `$TAI_CONF/usage-<folder>.json` and the login line comes from the same
+  `claude auth status` / `auth.json` lookups (needs `jq`). Project rows don't show an `@account` tag there; the usage
+  header and the login line do. Not run live yet.
+- Not done: other CLIs have no `configEnv`.
 
 ## Shared config
 
@@ -83,7 +89,7 @@ config folder, so a pane on another account just gets `CLAUDE_CONFIG_DIR` / `COD
   (Windows only). Property order is the order of the CLI list. Add a CLI here to launch it on both OSes.
 - `projects.json` can be one file for both OSes: set `TAI_CONF` to a folder holding it (Linux default `~/.config/tai`;
   on Windows it overrides `windows/projects.json`). A project's `path` is a plain string or
-  `{"windows": "C:\\code\\app", "linux": "/home/me/code/app"}`; plain strings only show on the OS they belong to,
+  `{"windows": "C:\\code\\app", "linux": "/home/me/code/app", "macos": "/Users/me/code/app"}`; plain strings only show on the OS they belong to,
   and entries for the other OS are kept untouched. Runtime state (`state/`, usage, open panes) stays per machine.
 - Codex hooks need `[features] hooks = true` in `~/.codex/config.toml` and must be trusted on first run;
   `codex-hooks.example.json` has a `commandWindows` entry so one hooks file can serve both OSes.

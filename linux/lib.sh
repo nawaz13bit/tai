@@ -102,6 +102,214 @@ send_toast() {   # title text
 remove_project() { edit_projects 'map(select(lp != $p))' --arg p "$1"; }
 set_agent()      { edit_projects 'map(if lp == $p then .agent = $a else . end)' --arg p "$1" --arg a "$2"; }
 
+# --- accounts ---------------------------------------------------------------------------------
+# accounts.json (repo root, git-ignored; see accounts.example.json) lists named accounts per CLI as config folders:
+#   { "claude": { "personal": "~/.claude", "work": "~/.claude-work" } }
+# The first is the default. agents.json's "configEnv" names the variable that moves a CLI's login (CLAUDE_CONFIG_DIR,
+# CODEX_HOME), so a pane on another account just gets another folder.
+ACCOUNTS="$TAI_DIR/../accounts.json"
+
+agent_accounts() {   # agent -> account names, one per line (nothing when the agent has none or no configEnv)
+    [[ -f "$ACCOUNTS" && -f "$REGISTRY" ]] || return 0
+    [[ -n "$(jq -r --arg a "$1" '.[$a].configEnv // empty' "$REGISTRY" 2>/dev/null)" ]] || return 0
+    jq -r --arg a "$1" '.[$a] // {} | keys_unsorted[]' "$ACCOUNTS" 2>/dev/null
+}
+
+project_account() {   # path agent -> the project's saved account if it still exists, else the first account
+    local names saved
+    names="$(agent_accounts "$2")"
+    [[ -n "$names" ]] || return 0
+    saved="$(jq -r --arg p "$1" --arg a "$2" "$JQ_DEFS"' .[] | select(lp == $p) | .accounts[$a] // empty' "$PROJECTS" 2>/dev/null | head -n1)"
+    if [[ -n "$saved" ]] && grep -qxF -- "$saved" <<< "$names"; then echo "$saved"; else head -n1 <<< "$names"; fi
+}
+
+account_dir() {   # agent account -> folder with ~ expanded
+    local d
+    d="$(jq -r --arg a "$1" --arg n "$2" '.[$a][$n] // empty' "$ACCOUNTS" 2>/dev/null)"
+    [[ -n "$d" ]] && echo "${d/#\~/$HOME}"
+}
+
+# Points the agent's config variable at the account's folder (created on first use; Codex also gets the hooks and
+# config copied in once). Other agents' variables are unset first. The CLI's own default folder leaves it unset.
+set_agent_account_env() {   # agent account
+    [[ -f "$REGISTRY" ]] || return 0
+    local v var dir def
+    while IFS= read -r v; do [[ -n "$v" ]] && unset "$v"; done < <(jq -r '.[] | .configEnv // empty' "$REGISTRY")
+    [[ -n "$2" ]] || return 0
+    var="$(jq -r --arg a "$1" '.[$a].configEnv // empty' "$REGISTRY")"
+    dir="$(account_dir "$1" "$2")"
+    [[ -n "$var" && -n "$dir" ]] || return 0
+    def="$(jq -r --arg a "$1" '.[$a].defaultDir // empty' "$REGISTRY")"
+    def="${def/#\~/$HOME}"
+    [[ -n "$def" && "${dir%/}" == "${def%/}" ]] && return 0
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir"
+        if [[ "$1" == codex ]]; then
+            local f
+            for f in hooks.json config.toml; do [[ -f "$HOME/.codex/$f" ]] && cp "$HOME/.codex/$f" "$dir/"; done
+        fi
+    fi
+    export "$var=$dir"
+}
+
+set_project_account() {   # path agent account
+    edit_projects 'map(if lp == $p then .accounts = ((.accounts // {}) + {($a): $acc}) else . end)' \
+        --arg p "$1" --arg a "$2" --arg acc "$3"
+}
+
+is_default_account_dir() {   # agent dir -> true when it is the CLI's own default folder
+    local def
+    def="$(jq -r --arg a "$1" '.[$a].defaultDir // empty' "$REGISTRY" 2>/dev/null)"
+    def="${def/#\~/$HOME}"
+    [[ -n "$def" && "${2%/}" == "${def%/}" ]]
+}
+
+usage_name_for_dir() {   # Claude config dir -> usage file name, one per account (usage.json for the default)
+    local leaf
+    leaf="$(basename "${1%/}" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/_/g')"
+    echo "usage-$leaf.json"
+}
+
+# Who an account is logged in as: "email (plan)", "not logged in" or "checking..." while a lookup runs. Codex is read
+# from auth.json (only the email and plan claims of the id token); Claude through `claude auth status` in the
+# background, cached for 10 minutes in the state folder.
+account_identity() {   # agent account
+    local dir tok p cache age=999999 mt out
+    dir="$(account_dir "$1" "$2")"
+    [[ -n "$dir" ]] || return 0
+    case "$1" in
+        codex)
+            [[ -f "$dir/auth.json" ]] || { echo "not logged in"; return; }
+            tok="$(jq -r '.tokens.id_token // empty' "$dir/auth.json" 2>/dev/null | cut -d. -f2)"
+            [[ -n "$tok" ]] || { echo "not logged in"; return; }
+            p="${tok//-/+}"; p="${p//_//}"
+            while ((${#p} % 4)); do p+="="; done
+            out="$(printf '%s' "$p" | base64 -d 2>/dev/null | jq -r 'if .email then "\(.email) (\(.["https://api.openai.com/auth"].chatgpt_plan_type // "?"))" else "not logged in" end' 2>/dev/null)"
+            echo "${out:-not logged in}" ;;
+        claude)
+            mkdir -p "$STATE_DIR"
+            cache="$STATE_DIR/ident_$(printf '%s' "$dir" | cksum | cut -d' ' -f1).txt"
+            if [[ -f "$cache" ]]; then
+                mt="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null)"
+                [[ -n "$mt" ]] && age=$(($(date +%s) - mt))
+            fi
+            if ((age >= 600)) && [[ ! -e "$cache.run" || -n "$(find "$cache.run" -mmin +2 2>/dev/null)" ]]; then
+                : > "$cache.run"
+                (
+                    if is_default_account_dir claude "$dir"; then out="$(claude auth status 2>/dev/null)"
+                    else out="$(CLAUDE_CONFIG_DIR="$dir" claude auth status 2>/dev/null)"; fi
+                    jq -r 'if .loggedIn and .email then .email + (if .subscriptionType then " (\(.subscriptionType))" else "" end) else "not logged in" end' <<< "$out" > "$cache.tmp" 2>/dev/null \
+                        || echo "login unknown (claude auth status failed)" > "$cache.tmp"
+                    mv -f "$cache.tmp" "$cache"; rm -f "$cache.run"
+                ) >/dev/null 2>&1 &
+            fi
+            if [[ -f "$cache" ]]; then cat "$cache"; else echo "checking..."; fi ;;
+    esac
+}
+
+# --- opt-in install of tai's status hooks into each CLI's own config (dashboard key H) ------------
+# init_generated_configs fills this checkout's folder into every *.example.json hook template and writes the result to
+# generated/ (git-ignored; existing files are left alone). install_agent_hooks then asks per CLI, backs the user's file up
+# to *.tai-backup-<stamp> only when it changes, and merges our entries in (or owns the file, for Copilot).
+# Schemas for qwen/cursor/copilot come from docs and are unconfirmed. Claude and agy are not covered.
+GENERATED="$TAI_DIR/generated"
+HOOKS_ANSWERS="$STATE_DIR/hooks-install.json"
+HOOK_SCRIPT="$TAI_DIR/hook.sh"
+HOOK_AGENTS=(codex qwen cursor copilot)
+
+init_generated_configs() {
+    local f out repo
+    repo="$(cd "$TAI_DIR/.." && pwd)"
+    mkdir -p "$GENERATED"
+    for f in "$TAI_DIR"/*.example.json; do
+        [[ -e "$f" ]] || continue
+        case "${f##*/}" in projects.example.json|claude-settings.example.json) continue ;; esac
+        out="$GENERATED/$(basename "$f" .example.json).json"
+        [[ -e "$out" ]] && continue
+        sed "s|/path/to/terminal_ai|$repo|g" "$f" > "$out"
+    done
+}
+
+hook_target() {   # agent -> "file|source in generated/|merge or own|note"
+    case "$1" in
+        codex)   echo "$HOME/.codex/hooks.json|codex-hooks.json|merge|Codex also needs [features] hooks = true in ~/.codex/config.toml and trusting the hooks on first run." ;;
+        qwen)    echo "$HOME/.qwen/settings.json|qwen-settings.json|merge|" ;;
+        cursor)  echo "$HOME/.cursor/hooks.json|cursor-hooks.json|merge|" ;;
+        copilot) echo "$HOME/.copilot/hooks/tai.json|copilot-hooks.json|own|" ;;
+        *) return 1 ;;
+    esac
+}
+
+set_hook_answer() {   # agent answer
+    local tmp="$HOOKS_ANSWERS.$$.tmp"
+    mkdir -p "$STATE_DIR"
+    [[ -f "$HOOKS_ANSWERS" ]] || echo '{}' > "$HOOKS_ANSWERS"
+    jq --arg n "$1" --arg v "$2" '.[$n] = $v' "$HOOKS_ANSWERS" > "$tmp" && mv -f "$tmp" "$HOOKS_ANSWERS"
+}
+
+hooks_pending() {   # installed CLIs with a hook target that have not been answered yet, one per line
+    local a
+    for a in "${HOOK_AGENTS[@]}"; do
+        command -v "$(agent_exe "$a")" >/dev/null 2>&1 || continue
+        [[ -f "$HOOKS_ANSWERS" ]] && jq -e --arg a "$a" 'has($a)' "$HOOKS_ANSWERS" >/dev/null 2>&1 && continue
+        echo "$a"
+    done
+}
+
+# Asks, then installs, for each CLI named. Sets MSG to a one-line summary.
+install_agent_hooks() {
+    local n spec file src mode note gen what ans stamp tmp pause=0
+    local ok=() skipped=() failed=()
+    init_generated_configs
+    for n in "$@"; do
+        spec="$(hook_target "$n")" || continue
+        IFS='|' read -r file src mode note <<< "$spec"
+        gen="$GENERATED/$src"
+        if [[ -e "$file" ]]; then
+            if [[ "$mode" == own ]]; then what="replace $file (backup kept)"; else what="merge into $file (backup kept)"; fi
+        else what="create $file"; fi
+        printf '\n\e[36m%s: %s\e[0m\n' "$n" "$what"
+        printf 'Install tai status hooks (y/N) '; read -r ans
+        if [[ "$ans" != [yY]* ]]; then set_hook_answer "$n" declined; skipped+=("$n"); continue; fi
+        if ! jq -e . "$gen" >/dev/null 2>&1; then
+            printf '\e[31m%s: not installed - %s is missing or invalid\e[0m\n' "$n" "$gen"; failed+=("$n"); pause=1; continue
+        fi
+        mkdir -p "$(dirname "$file")"
+        stamp="$(date +%Y%m%d-%H%M%S)"
+        tmp="$file.$$.tmp"
+        if [[ "$mode" == own || ! -e "$file" ]]; then
+            if [[ -e "$file" ]] && cmp -s "$gen" "$file"; then :   # already identical
+            else
+                [[ -e "$file" ]] && cp "$file" "$file.tai-backup-$stamp"
+                cp "$gen" "$tmp" && mv -f "$tmp" "$file"
+            fi
+        else
+            if ! jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+                printf '\e[31m%s: not installed - %s is not a JSON object\e[0m\n' "$n" "$file"; failed+=("$n"); pause=1; continue
+            fi
+            # An event that already runs our hook script is left alone, so running this twice changes nothing.
+            if ! jq -s --arg m "$HOOK_SCRIPT" '.[0] as $c | .[1] as $g
+                    | reduce ($g.hooks | keys_unsorted[]) as $ev ($c;
+                        if ((.hooks[$ev] // []) | tojson | contains($m)) then .
+                        else .hooks[$ev] = ((.hooks[$ev] // []) + $g.hooks[$ev]) end)
+                    | reduce ($g | keys_unsorted[]) as $k (.; if $k != "hooks" and (has($k) | not) then .[$k] = $g[$k] else . end)' \
+                    "$file" "$gen" > "$tmp" 2>/dev/null; then
+                rm -f "$tmp"; printf '\e[31m%s: not installed - could not merge into %s\e[0m\n' "$n" "$file"; failed+=("$n"); pause=1; continue
+            fi
+            if [[ "$(jq -cS . "$file")" == "$(jq -cS . "$tmp")" ]]; then rm -f "$tmp"
+            else cp "$file" "$file.tai-backup-$stamp"; mv -f "$tmp" "$file"; fi
+        fi
+        set_hook_answer "$n" installed; ok+=("$n")
+        if [[ -n "$note" ]]; then printf '\e[33m%s\e[0m\n' "$note"; pause=1; fi
+    done
+    if ((pause)); then printf 'Press Enter to continue '; read -r ans; fi
+    MSG=""
+    ((${#ok[@]})) && MSG+="installed: ${ok[*]}; "
+    ((${#skipped[@]})) && MSG+="skipped: ${skipped[*]}; "
+    ((${#failed[@]})) && MSG+="failed: ${failed[*]}; "
+    if [[ -n "$MSG" ]]; then MSG="Hooks ${MSG%; }"; else MSG="Hooks: nothing to do"; fi
+}
+
 # --- state files (written by hook.sh / statusline.sh / agy-statusline.sh, read by the dashboard) -----
 # Key per project folder: readable prefix plus a hash, so /a-b and /a_b get different files.
 
@@ -207,7 +415,10 @@ open_project() {   # name path agent [nofocus]
         MSG="Focused $name"; return 0
     fi
     [[ -d "$path" ]] || { MSG="Folder not found: $path"; return 1; }
-    spec="$(next_split)" || return 1
+    # Not "$(next_split)": a subshell would lose the MSG it sets when nothing fits.
+    local sf; sf="$(mktemp)"
+    next_split >"$sf" || { rm -f "$sf"; return 1; }
+    spec="$(<"$sf")"; rm -f "$sf"
     IFS=$'\t' read -r base dir size <<< "$spec"
     id="$(tmux split-window "$dir" -l "$size" -t "$base" -c "$path" -P -F '#{pane_id}' \
             "$TAI_DIR/slot.sh" "$name" "$path" "$agent")" || { MSG="tmux could not split"; return 1; }

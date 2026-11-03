@@ -36,7 +36,11 @@ if [[ -n "$dir" ]]; then
 fi
 
 jq -c '.rate_limits | select(. != null) | {updated_epoch: (now | floor), five_hour, seven_day}' <<< "$raw" 2>/dev/null |
-    { read -r usage && [[ -n "$usage" ]] && { mkdir -p "$TAI_CONF"; write_atomic "$USAGE_FILE" <<< "$usage"; }; }
+    { read -r usage && [[ -n "$usage" ]] && {
+        # A pane on another account (CLAUDE_CONFIG_DIR set by tai) writes its own file, so accounts don't overwrite each other.
+        ufile="$USAGE_FILE"
+        [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] && ! is_default_account_dir claude "$CLAUDE_CONFIG_DIR" && ufile="$TAI_CONF/$(usage_name_for_dir "$CLAUDE_CONFIG_DIR")"
+        mkdir -p "$TAI_CONF"; write_atomic "$ufile" <<< "$usage"; }; }
 
 if [[ -n "$dir" ]]; then
     ctx="$(jq -r 'if .ctx != null then "\(.ctx | round)%" else "--" end' <<< "$res")"

@@ -1,0 +1,26 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "zsh /path/to/terminal_ai/macos/statusline.zsh"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" } ] }
+    ]
+  }
+}

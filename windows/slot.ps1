@@ -3,6 +3,8 @@
 param([Parameter(Mandatory)][int]$Slot)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
+# Windows Terminal runs at a raised priority (Protect-Tai) and its panes inherit it; agents should stay Normal.
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'Normal' } catch { }
 $stateDir = Join-Path $PSScriptRoot 'state'
 New-Item -ItemType Directory -Force $stateDir | Out-Null
 $assign = Join-Path $stateDir "slot$Slot.assign"

@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "zsh /path/to/terminal_ai/macos/hook.zsh" }] }]
+  }
+}

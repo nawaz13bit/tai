@@ -867,6 +867,47 @@ function Set-ProjectAccount($path, $agent, $account) {
     Save-Projects $projects
 }
 
+# ---- Keeping tai responsive -----------------------------------------------------------------------------------
+$script:limitsPath = Join-Path (Split-Path $PSScriptRoot) 'limits.json'
+
+# Keeps tai's own UI responsive when the PC is busy: the dashboard and its Windows Terminal window (plus that
+# window's per-pane OpenConsole hosts) get a higher scheduling priority, and the dashboard's memory is kept
+# resident so Windows does not page it out under RAM pressure. Agents keep Normal priority (they are not
+# touched). Optional "tai" entry in limits.json: { "tai": { "priority": "High", "terminal": "AboveNormal", "minRamMb": 100 } }
+# (priority / terminal: Idle, BelowNormal, Normal, AboveNormal, High; "off": true disables all of it).
+# Windows cannot reserve CPU or RAM for a process, so this only makes tai win when processes compete.
+function Protect-Tai {
+    try {
+        $c = $null
+        try { $c = (Get-Content $script:limitsPath -Raw -ErrorAction Stop | ConvertFrom-Json).tai } catch { }
+        if ($c -and $c.off) { return }
+        $dash = if ($c -and $c.priority) { [string]$c.priority } else { 'High' }
+        $term = if ($c -and $c.terminal) { [string]$c.terminal } else { 'AboveNormal' }
+        $minMb = if ($c -and $null -ne $c.minRamMb) { [int]$c.minRamMb } else { 100 }
+        $me = [Diagnostics.Process]::GetCurrentProcess()
+        try { $me.PriorityClass = $dash } catch { }
+        if ($minMb -gt 0) {
+            try {
+                $me.MaxWorkingSet = [IntPtr](2GB)   # raised first: the minimum may not exceed the maximum
+                $me.MinWorkingSet = [IntPtr]($minMb * 1MB)
+            } catch { }
+        }
+        # Windows Terminal hosting this dashboard: found by walking up the parent chain.
+        $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -ErrorAction Stop)
+        $wt = $null; $id = $PID; $hops = 0
+        while ($id -and $hops -lt 8) {
+            $p = $all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1
+            if (-not $p) { break }
+            if ($p.Name -eq 'WindowsTerminal.exe') { $wt = $p.ProcessId; break }
+            $id = $p.ParentProcessId; $hops++
+        }
+        if ($wt) {
+            $ids = @($wt) + @($all | Where-Object { $_.ParentProcessId -eq $wt -and $_.Name -eq 'OpenConsole.exe' } | ForEach-Object { $_.ProcessId })
+            foreach ($i in $ids) { try { (Get-Process -Id $i -ErrorAction Stop).PriorityClass = $term } catch { } }
+        }
+    } catch { }
+}
+
 # The known CLIs that are installed right now (all of them when none is found, so the menus never end up empty).
 # Called once when the dashboard starts; the chooser and the G key use $script:installedAgents.
 function Update-InstalledAgents {

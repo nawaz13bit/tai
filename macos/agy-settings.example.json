@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "zsh /path/to/terminal_ai/macos/agy-statusline.zsh"
+  },
+  "altScreenMode": "never"
+}
