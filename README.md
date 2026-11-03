@@ -2,22 +2,28 @@
 
 One terminal window with a project dashboard and several Claude Code panes.
 
-- `windows/` — PowerShell + Windows Terminal version (entry point `windows/tai.ps1` / `windows/tai.cmd`).
-- `macos/` — zsh + tmux port (entry point `macos/tai`; built-in zsh, `brew install tmux jq`). Same features as Linux,
-  with BSD tools and `osascript` toasts. Written without access to a Mac: not yet run. See `macos/README.md`.
-- `linux/` — Bash + tmux port (entry point `linux/tai`; needs bash 4+, tmux 3+, jq). Same features as the Windows
-  version: hook-driven working / waiting / done states, sub-agent and shell counts, model / effort / ctx / compact,
-  git and GitHub row, Claude / Codex / agy usage bars, pinned keys block, session restore and pane move (M + arrow).
-  Setup: copy the hooks / status line from `linux/claude-settings.json`, `linux/codex-hooks.example.json` and
-  `linux/agy-settings.example.json` into the CLIs' settings, replacing `/path/to/terminal_ai` with this checkout.
-  Also supported: opencode, Cursor (`agent`), Copilot and Qwen Code. They launch and resume (`--continue`) with no setup;
-  `qwen-settings.example.json` (to `~/.qwen/settings.json`), `copilot-hooks.example.json` (to `~/.copilot/hooks/`) and
-  `cursor-hooks.example.json` (to `~/.cursor/hooks.json`) add working / waiting / done status. opencode has no command hooks.
-  The `windows/` folder has the same files. Flags and hook schemas come from the docs and are untested here.
-  Not run yet on a real machine (written on Windows without tmux or jq).
+| Folder | Stack | Entry point | Status |
+|---|---|---|---|
+| `windows/` | PowerShell 5.1 + Windows Terminal | `windows/tai.cmd` / `windows/tai.ps1` | Used daily; newer features not all tested live |
+| `linux/` | Bash 4+ + tmux 3+ + jq | `linux/tai` | Feature parity with Windows; `bash -n` checked only, never run on a real machine |
+| `macos/` | zsh + tmux + jq | `macos/tai` | Linux port with BSD tools and `osascript` toasts; never run (see `macos/README.md`) |
+
+Both Windows and Linux give you:
+
+- one terminal window with a project dashboard plus one pane per open project (Claude Code, Codex, agy, opencode,
+  Cursor `agent`, Copilot, Qwen Code); opencode, Cursor, Copilot and Qwen launch and resume (`--continue`) with no setup;
+- hook-driven working / waiting / done states, sub-agent and shell counts, model / effort / ctx / compact;
+- git and GitHub row, Claude / Codex / agy usage bars, pinned keys block, session restore, pane move (`M` + arrow);
+- per-project agent accounts (Claude and Codex), toasts when an agent needs you, diff / worktree / push / PR / preview / find.
+
+Differences: Windows uses Windows Terminal panes and reads Claude transcripts for the preview; Linux uses tmux windows
+and panes and shows the pane's screen. On Windows, `Protect-Tai` raises the dashboard and Windows Terminal priority and
+keeps the dashboard's memory resident to reduce UI lag; on Linux agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off).
+Hook and status-line examples sit in both folders (`claude-settings`, `codex-hooks`, `agy-settings`, `qwen-settings`,
+`copilot-hooks`, `cursor-hooks`); flags and hook schemas come from the docs and are untested here.
 
 Each folder keeps its own runtime `state/`.
-Windows hook/statusline settings reference `windows/*.ps1` by absolute path.
+Windows hook/statusline settings reference `windows/*.ps1` by absolute path; Linux ones reference `linux/*.sh`.
 
 ## Quick start
 
@@ -36,7 +42,12 @@ Windows hook/statusline settings reference `windows/*.ps1` by absolute path.
   `windows/*.example.json` files to `windows/generated/` (git-ignored, path already filled in; delete one to
   regenerate); copy them into those CLIs' own configs. Then run
   `windows/tai.cmd` (`windows/setup-profile.ps1` can add a `tai` command to your PowerShell profile).
-- **Linux**: install bash 4+, tmux 3+ and jq, edit the `linux/*` settings the same way, then run `linux/tai`.
+  The repo row is hidden for folders that aren't git repos.
+- **Linux**: install bash 4+, tmux 3+ and jq (`notify-send` optional, for toasts). Copy the hooks / status line from
+  `linux/claude-settings.json`, `linux/codex-hooks.example.json` and `linux/agy-settings.example.json` into the CLIs'
+  settings, replacing `/path/to/terminal_ai` with this checkout (the other examples go to `~/.qwen/settings.json`,
+  `~/.copilot/hooks/` and `~/.cursor/hooks.json`; opencode has no command hooks). Press `H` in the dashboard to install
+  them for you. List projects in `~/.config/tai/projects.json` (or press `A`), `chmod +x linux/tai`, then run `linux/tai`.
 - **macOS**: `brew install tmux jq`, edit the `macos/*` settings the same way, `chmod +x macos/tai`, then run `macos/tai`.
 
 Licensed under the MIT License (see `LICENSE`).

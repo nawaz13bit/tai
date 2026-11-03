@@ -33,4 +33,9 @@ Replace `/path/to/terminal_ai` with this checkout. Commands start with `zsh `, s
 - Toasts through `osascript` (T key toggles; flag file `~/.config/tai/state/toast.off`).
 - Data (`projects.json`, `agents.json`, state) is shared with the other ports. A project path can be
   `{"windows": "...", "linux": "...", "macos": "/Users/me/code/app"}`.
-- Same keys as Linux: arrows / j k, Enter, X, D, A, G, Shift+Up/Down, F, W, T, M, P, V, `/`, Q.
+- Same keys as Linux: arrows / j k, Enter, X, D, A, G, Shift+Up/Down, F, W, T, M, P, V, `/`, Q, plus `U` (switch the
+  closed project's Claude / Codex account), `H` (hook installer) and `R` (reload config, refresh usage).
+- Accounts: copy `accounts.example.json` to `accounts.json` (see the main README). The usage file per account is
+  `$TAI_CONF/usage-<folder>.json`; the login line needs `jq` and `claude auth status`.
+- Agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off).
+- Config lives in `~/.config/tai` (override with `TAI_CONF`); `agents.json` at the repo root is shared with the other ports.
