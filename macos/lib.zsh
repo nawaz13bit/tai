@@ -73,10 +73,16 @@ list_projects() {
 }
 
 # Replaces the projects file with the output of a jq filter (args after the filter are passed to jq).
-edit_projects() {
+edit_projects() {   # serialized with a lock so two quick edits cannot lose one another
+    mkdir -p "$STATE_DIR"
+    with_lock _edit_projects "$@"
+}
+
+_edit_projects() {
     local tmp filter="$1"
     shift
-    tmp="$(mktemp)" && jq "$@" "$JQ_DEFS $filter" "$PROJECTS" > "$tmp" && mv "$tmp" "$PROJECTS"
+    tmp="$(mktemp)" || return 1
+    if jq "$@" "$JQ_DEFS $filter" "$PROJECTS" > "$tmp"; then mv "$tmp" "$PROJECTS"; else rm -f "$tmp"; return 1; fi
 }
 
 add_project() {   # path [name]; sets MSG and returns 1 when the name or folder is already listed
@@ -193,7 +199,7 @@ account_identity() {   # agent account
             mkdir -p "$STATE_DIR"
             cache="$STATE_DIR/ident_$(printf '%s' "$dir" | cksum | cut -d' ' -f1).txt"
             if [[ -f "$cache" ]]; then
-                mt="$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null)"
+                mt="$(file_mtime "$cache")"
                 [[ -n "$mt" ]] && age=$(( $(date +%s) - mt ))
             fi
             if (( age >= 600 )) && [[ ! -e "$cache.run" || -n "$(find "$cache.run" -mmin +2 2>/dev/null)" ]]; then

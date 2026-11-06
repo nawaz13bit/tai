@@ -1,3 +1,5 @@
 * text=auto
 *.sh text eol=lf
 linux/tai text eol=lf
+*.zsh text eol=lf
+macos/tai text eol=lf

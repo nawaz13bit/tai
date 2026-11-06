@@ -18,7 +18,12 @@ $ctxText = if ($null -ne $ctx) { '{0:N0}%' -f $ctx } else { '--' }
 # Auto-compaction isn't sent on stdin; read the window (tokens) from user settings.
 $compactAt = 95
 $window = $data.context_window.context_window_size
+# A pane on another account (CLAUDE_CONFIG_DIR set by tai) has its own settings.json.
 $userSettings = Join-Path $env:USERPROFILE '.claude\settings.json'
+if ($env:CLAUDE_CONFIG_DIR) {
+    $acctSettings = Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json'
+    if (Test-Path $acctSettings) { $userSettings = $acctSettings }
+}
 if ((Test-Path $userSettings) -and $window) {
     $acw = $null
     try { $acw = (Get-Content $userSettings -Raw | ConvertFrom-Json).autoCompactWindow } catch { }
@@ -37,7 +42,7 @@ if (-not $effort -and (Test-Path $userSettings)) {
 $left = if ($null -ne $ctx) { [math]::Max(0, $compactAt - $ctx) } else { $null }
 $compact = if ($null -ne $left) { 'compact in ~{0:N0}%' -f $left } else { 'compact --' }
 
-# Per-project state for the dashboard pane (dashboard.ps1).
+# Per-project state for the dashboard pane (slot.ps1 / status.ps1).
 $dir = $data.workspace.project_dir
 if (-not $dir) { $dir = $data.workspace.current_dir }
 if ($dir) {
@@ -52,7 +57,7 @@ if ($dir) {
         dir        = $dir
         model      = $model
         effort     = $effort
-        ctx       = $ctx
+        ctx        = $ctx
         compact    = $left
         cost      = $data.cost.total_cost_usd
         transcript = $data.transcript_path

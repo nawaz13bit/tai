@@ -42,6 +42,7 @@ if ! installed "$agent"; then
     fi
     print "'$agent' is not installed - using '$alt' instead."; sleep 2
     agent="$alt"
+    tmux set-option -p -t "$TMUX_PANE" @tai_agent "$agent" 2>/dev/null   # the dashboard shows what actually runs
 fi
 
 # Reads one key into $KEY ("up", "down", "enter", a digit, or "other"); returns 1 after 3 s without a key.

@@ -66,4 +66,14 @@ Tick each box; note anything odd next to it.
 - [ ] `V` state survives a dashboard restart (flag `preview.on`).
 - [ ] `/` find: type part of a project name, the cursor jumps to the match, nothing is hidden, and M/reorder/save still use the full list.
 - [x] `F` on a project with no changes or a short diff: the tab stays open until a key is pressed (confirmed 2026-10-31).
-- [ ] `T` toast toggle and `F` diff / `W` worktree were confirmed live 2026-10-30; no re-test needed.
+- [x] `T` toast toggle and `F` diff / `W` worktree were confirmed live 2026-10-30; no re-test needed.
+
+## 6. Built 2026-11-06, not yet seen live (restart tai first)
+- [ ] `S` opens the agents screen tab for a Claude, a Codex and another-CLI project; `q` closes it.
+- [ ] Bottom block ends with `agents: N open (...) - W working, X waiting, I idle`; counts change as agents work, wait and finish.
+- [ ] Codex project in `waiting` flips back to working once Codex resumes (rollout write), including a project on a second Codex account.
+- [ ] Codex effort row shows the `model_reasoning_effort` from `config.toml` (not a value from a `[profiles.*]` table).
+- [ ] agy shows `done`, and a stale `working` report goes idle after 3 minutes.
+- [ ] Repo row is hidden for a non-git folder.
+- [ ] Linux/macOS (on a real machine): `S` opens a tmux window; arrows work (macOS: fractional `read -t`); empty session list shows no blank row.
+- [ ] Linux/macOS dashboards now match Windows: the `agents: N open ...` line, Codex effort + ctx rows (rollout log), Codex waiting-clear, agy `done` / stale-working-to-idle. macOS `codex_scan` (zsh glob `(.NOm[1,20])`, `=~` with `$match`) is unverified: check Codex ctx shows up.

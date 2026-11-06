@@ -7,10 +7,23 @@ raw="$(cat)"
 . "${0:A:h}/lib.zsh"
 
 dir="${TAI_PROJECT_DIR:-}"
+# Like Claude's hooks: working/waiting -> idle becomes "done" (kept until the next working/waiting); activity_at is
+# when the activity last changed, so the dashboard can show its age.
+prev="null"
+if [[ -n "$dir" && -f "$STATE_DIR/$(state_key "$dir").json" ]]; then
+    prev="$(jq -c '.' "$STATE_DIR/$(state_key "$dir").json" 2>/dev/null)" || prev="null"
+    [[ -n "$prev" ]] || prev="null"
+fi
 # quotas: per model bucket, name and percent left; quota_left: the lowest of them.
-res="$(jq -c --arg dir "$dir" '
+res="$(jq -c --arg dir "$dir" --argjson prev "$prev" '
     [(.quota // {}) | to_entries[] | select(.value.remaining_fraction != null)
         | {name: .key, left: ((100 * .value.remaining_fraction * 10 | round) / 10)}] as $q
+    | (if $prev != null and $prev.agent == "agy" then ($prev.activity // "") else "" end) as $pa
+    | (if .tool_confirmation_pending then "waiting"
+       elif (.agent_state | IN("thinking", "working", "tool_use")) then "working"
+       elif .agent_state == "idle" then (if ($pa | IN("working", "waiting", "done")) then "done" else "idle" end)
+       else null end) as $act
+    | (now | floor) as $now
     | {
         dir: $dir,
         agent: "agy",
@@ -18,11 +31,10 @@ res="$(jq -c --arg dir "$dir" '
         ctx: .context_window.used_percentage,
         quota_left: ($q | map(.left) | min),
         quotas: $q,
-        activity: (if .tool_confirmation_pending then "waiting"
-                   elif (.agent_state | IN("thinking", "working", "tool_use")) then "working"
-                   elif .agent_state == "idle" then "idle"
-                   else null end),
-        updated_epoch: (now | floor)
+        activity: $act,
+        activity_at_epoch: (if $prev != null and $prev.agent == "agy" and $prev.activity_at_epoch != null and $pa == $act
+                            then $prev.activity_at_epoch else $now end),
+        updated_epoch: $now
       }' <<< "$raw" 2>/dev/null)" || exit 0
 
 if [[ -n "$dir" ]]; then

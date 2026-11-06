@@ -64,15 +64,18 @@ function ResetLine($limit) {
 $script:codexUsage = $null
 $script:codexStamp = [datetime]::MinValue
 $script:codexCtxByDir = @{}
-$script:codexByHome = @{}   # per CODEX_HOME folder: @{ stamp; usage; ctx }
+$script:codexMtByDir = @{}   # per project folder: last write of its newest rollout log (stands in for Claude's transcript)
+$script:codexByHome = @{}   # per CODEX_HOME folder: @{ stamp; usage; ctx; mt }
 # Usage and per-project context of one Codex home (default ~/.codex); each account's folder is scanned and cached separately.
 function Get-CodexUsage($codexHome) {
     if (-not $codexHome) { $codexHome = Join-Path $env:USERPROFILE '.codex' }
     $hk = $codexHome.ToLower()
     $c0 = $script:codexByHome[$hk]
-    if ($c0 -and ((Get-Date) - $c0.stamp).TotalSeconds -lt 30) { $script:codexCtxByDir = $c0.ctx; return $c0.usage }
+    if ($c0 -and ((Get-Date) - $c0.stamp).TotalSeconds -lt 30) { $script:codexCtxByDir = $c0.ctx; $script:codexMtByDir = $c0.mt; return $c0.usage }
     $script:codexUsage = $null
     $script:codexCtxByDir = @{}
+    $script:codexMtByDir = @{}
+    $mtByDir = @{}
     try {
         $root = Join-Path $codexHome 'sessions'
         # Logs sit in YYYY\MM\DD folders; look at the newest day folders only (up to 7, stopping at 20 files) so years of
@@ -110,6 +113,10 @@ function Get-CodexUsage($codexHome) {
             $txt = [Text.Encoding]::UTF8.GetString($buf)
             $cwd = [regex]::Match([Text.Encoding]::UTF8.GetString($hbuf), '"cwd":"((?:[^"\\]|\\.)*)"')
             $c = [regex]::Matches($txt, '"last_token_usage":\{[^}]*?"total_tokens":(\d+)\},"model_context_window":(\d+)')
+            if ($cwd.Success) {
+                $mk = Get-NormPath ($cwd.Groups[1].Value -replace '\\\\', '\')
+                if (-not $mtByDir.ContainsKey($mk)) { $mtByDir[$mk] = $f.LastWriteTime }
+            }
             if ($cwd.Success -and $c.Count -and [double]$c[$c.Count - 1].Groups[2].Value -gt 0) {
                 $key = Get-NormPath ($cwd.Groups[1].Value -replace '\\\\', '\')
                 if (-not $byDir.ContainsKey($key)) {
@@ -134,8 +141,9 @@ function Get-CodexUsage($codexHome) {
             }
         }
         $script:codexCtxByDir = $byDir
+        $script:codexMtByDir = $mtByDir
     } catch { }
-    $script:codexByHome[$hk] = @{ stamp = Get-Date; usage = $script:codexUsage; ctx = $script:codexCtxByDir }
+    $script:codexByHome[$hk] = @{ stamp = Get-Date; usage = $script:codexUsage; ctx = $script:codexCtxByDir; mt = $script:codexMtByDir }
     return $script:codexUsage
 }
 
@@ -287,6 +295,72 @@ function Get-Statuses {
     return $statuses
 }
 
+# Reasoning effort from a Codex home's config.toml (hooks don't carry it); cached 30 s.
+$script:codexEffort = @{}
+function Get-CodexEffort($codexHome) {
+    if (-not $codexHome) { $codexHome = Join-Path $env:USERPROFILE '.codex' }
+    $hk = $codexHome.ToLower()
+    $e = $script:codexEffort[$hk]
+    if ($e -and ((Get-Date) - $e.stamp).TotalSeconds -lt 30) { return $e.value }
+    $v = $null
+    try {
+        # Top level only: the text before the first [table] header (a [profiles.x] table has its own value).
+        $toml = (Get-Content (Join-Path $codexHome 'config.toml') -Raw -ErrorAction Stop) -split '(?m)^\s*\[', 2
+        $m = [regex]::Match($toml[0], '(?m)^\s*model_reasoning_effort\s*=\s*"([^"]+)"')
+        if ($m.Success) { $v = $m.Groups[1].Value }
+    } catch { }
+    $script:codexEffort[$hk] = @{ stamp = Get-Date; value = $v }
+    return $v
+}
+
+# agy's status line only writes when agy redraws it: a "working" report that has gone quiet for 3 minutes is stale
+# (the pane stopped or was closed without going idle), so it counts as idle.
+function ToDate($v) { try { return [datetime]$v } catch { return [datetime]::MinValue } }
+
+function Get-EffActivity($st) {
+    $a = [string]$st.activity
+    if ($a -eq 'working' -and $st.updated -and ((Get-Date) - (ToDate $st.updated)).TotalSeconds -gt 180) { return 'idle' }
+    return $a
+}
+
+# Open agents across all projects by state (same sources as the rows: hooks first, then agy's status line, then the
+# Claude transcript's last write). Returns open/working/waiting/idle counts and the same per CLI.
+function Get-AgentCounts($slots, $statuses, $hooks, $projects) {
+    $c = [ordered]@{ open = 0; working = 0; waiting = 0; idle = 0; by = [ordered]@{} }
+    foreach ($key in $slots.Keys) {
+        $slot = $slots[$key]
+        $agent = if ($slot.agent) { Get-Agent $slot } else { 'claude' }
+        $since = ToDate $slot.since
+        $st = $statuses[$key]; $hk = $hooks[$key]
+        $state = 'idle'
+        $mtime = $null
+        if ($st -and (ToDate $st.updated) -ge $since) {
+            if ($st.transcript -and (Test-Path $st.transcript)) { $mtime = (Get-Item $st.transcript).LastWriteTime }
+            if ($mtime -and ((Get-Date) - $mtime).TotalSeconds -lt $busySeconds) { $state = 'working' }
+            if ($agent -ne 'claude' -and $st.agent -eq $agent -and $st.activity) {
+                $state = switch (Get-EffActivity $st) { 'working' { 'working' } 'waiting' { 'waiting' } default { 'idle' } }
+            }
+        }
+        if ($agent -eq 'codex' -and -not $mtime) {
+            # The rollout times are per Codex home, so load this project's own account home first (cached).
+            $pr = @($projects) | Where-Object { (Get-NormPath $_.path) -eq $key } | Select-Object -First 1
+            if ($pr) { [void](Get-CodexUsage (ProjectAcctDir $pr 'codex')) }
+            $mtime = $script:codexMtByDir[$key]
+        }
+        if ($hk -and (ToDate $hk.updated) -ge $since) {
+            switch ($hk.status) {
+                'working' { $state = 'working' }
+                'waiting' { $state = if ($mtime -and ($mtime -gt (ToDate $hk.updated).AddSeconds(2))) { 'working' } else { 'waiting' } }
+                'done'    { $state = 'idle' }
+            }
+        }
+        $c.open++; $c[$state]++
+        if (-not $c.by.Contains($agent)) { $c.by[$agent] = 0 }
+        $c.by[$agent]++
+    }
+    return $c
+}
+
 # Latest hook report per project directory (working / waiting / done), written by hook.ps1.
 function Get-Hooks {
     $hooks = @{}
@@ -326,7 +400,7 @@ function Notify-Waiting($projects) {
         $key = Get-NormPath $p.path
         $slot = $slots[$key]; $hk = $hooks[$key]
         if (-not $slot -or -not $hk -or $hk.status -ne 'waiting') { $script:notified.Remove($key); continue }
-        if ([datetime]$hk.updated -lt [datetime]$slot.since) { continue }
+        if ((ToDate $hk.updated) -lt (ToDate $slot.since)) { continue }
         $stamp = [string]$hk.updated
         if ($script:notified[$key] -eq $stamp) { continue }
         $script:notified[$key] = $stamp
@@ -346,8 +420,8 @@ function Get-SubCount($project, $slot) {
         foreach ($line in Get-Content $file -ErrorAction Stop) {
             $f = $line -split "`t"
             if ($f.Count -lt 3) { continue }
-            $t = [datetime]$f[2]
-            if ($t -ge [datetime]$slot.since -and ((Get-Date) - $t).TotalMinutes -lt 30) { $n++ }
+            $t = ToDate $f[2]
+            if ($t -ge (ToDate $slot.since) -and ((Get-Date) - $t).TotalMinutes -lt 30) { $n++ }
         }
     } catch { }
     return $n
@@ -724,6 +798,12 @@ function Draw($projects, $cursor, $message) {
         $usageBlock += , @($hd, 'Cyan', $null)
         foreach ($ul in (UsageLinesFor $a)) { $usageBlock += , $ul }
     }
+    # One-line summary of all open agents.
+    $ac = Get-AgentCounts $slots $statuses $hooks $projects
+    if ($ac.open) {
+        $per = ($ac.by.Keys | ForEach-Object { "$($ac.by[$_]) $_" }) -join ', '
+        $usageBlock += , @("agents: $($ac.open) open ($per) - $($ac.working) working, $($ac.waiting) waiting, $($ac.idle) idle", $(if ($ac.waiting) { 'Magenta' } elseif ($ac.working) { 'Yellow' } else { 'Gray' }), $null)
+    }
 
     # Reserve room for the detail block and key help; scroll the project list to fit.
     # Preview rows (V): header plus up to 4 wrapped lines of the selected pane's latest reply.
@@ -786,7 +866,7 @@ function Draw($projects, $cursor, $message) {
         if ($slot) {
             $slotText = "[$($slot.slot)]"
             $state = 'starting'; $fg = 'Green'
-            if ($st -and [datetime]$st.updated -ge [datetime]$slot.since) {
+            if ($st -and (ToDate $st.updated) -ge (ToDate $slot.since)) {
                 $mtime = $null
                 if ($st.transcript -and (Test-Path $st.transcript)) { $mtime = (Get-Item $st.transcript).LastWriteTime }
                 if ($mtime -and ((Get-Date) - $mtime).TotalSeconds -lt $busySeconds) { $state = 'working'; $fg = 'Yellow' }
@@ -794,24 +874,27 @@ function Draw($projects, $cursor, $message) {
                 else { $state = 'idle' }
             }
             # agy's status line reports its own activity (agy-statusline.ps1).
-            if ($agent -ne 'claude' -and $st -and $st.agent -eq $agent -and $st.activity -and [datetime]$st.updated -ge [datetime]$slot.since) {
-                switch ($st.activity) {
+            if ($agent -ne 'claude' -and $st -and $st.agent -eq $agent -and $st.activity -and (ToDate $st.updated) -ge (ToDate $slot.since)) {
+                switch (Get-EffActivity $st) {
                     'working' { $state = 'working'; $fg = 'Yellow' }
                     'waiting' { $state = '! waiting'; $fg = 'Magenta' }
-                    'idle'    { $state = 'idle ' + (Age ([datetime]$st.updated)); $fg = 'Green' }
+                    'done'    { $state = 'done ' + (Age $(if ($st.activity_at) { ToDate $st.activity_at } else { ToDate $st.updated })); $fg = 'Cyan' }
+                    'idle'    { $state = 'idle ' + (Age (ToDate $st.updated)); $fg = 'Green' }
                 }
             }
             # Hooks know exactly when Claude is working, waiting on you, or finished; prefer them.
             $hk = $hooks[$key]
-            if ($hk -and [datetime]$hk.updated -ge [datetime]$slot.since) {
+            if ($hk -and (ToDate $hk.updated) -ge (ToDate $slot.since)) {
                 switch ($hk.status) {
                     'working' { $state = 'working'; $fg = 'Yellow' }
                     'waiting' {
                         # No hook fires when you answer a prompt; a transcript write after it means Claude resumed.
-                        $resumed = $mtime -and ($mtime -gt ([datetime]$hk.updated).AddSeconds(2))
+                        # Codex has no transcript: its newest rollout log write plays that part.
+                        $wm = if ($mtime) { $mtime } elseif ($agent -eq 'codex') { [void](Get-CodexUsage (ProjectAcctDir $p 'codex')); $script:codexMtByDir[$key] } else { $null }
+                        $resumed = $wm -and ($wm -gt (ToDate $hk.updated).AddSeconds(2))
                         if ($resumed) { $state = 'working'; $fg = 'Yellow' } else { $state = '! waiting'; $fg = 'Magenta' }
                     }
-                    'done'    { $state = 'done ' + (Age ([datetime]$hk.updated)); $fg = 'Cyan' }
+                    'done'    { $state = 'done ' + (Age (ToDate $hk.updated)); $fg = 'Cyan' }
                 }
             }
         }
@@ -834,7 +917,8 @@ function Draw($projects, $cursor, $message) {
         $lines += , @($text, $(if ($i -eq $cursor) { 'White' } else { $fg }), $bg)
         if (HasInfo $i) {
             $m = "$($icon.model) " + $(if ($st -and $st.model) { [string]$st.model } else { '--' })
-            if ($st -and $st.effort) { $m += "  $($icon.effort) $($st.effort)" }
+            $eff = if ($st -and $st.effort) { [string]$st.effort } elseif ($agent -eq 'codex') { Get-CodexEffort (ProjectAcctDir $p 'codex') } else { $null }
+            if ($eff) { $m += "  $($icon.effort) $eff" }
             $lines += , @("    $m", 'Gray', $bg)
             # Codex has no ctx in its state file: take it from the project's newest rollout log.
             $cv = if ($st -and $null -ne $st.ctx) { $st.ctx } elseif ($agent -eq 'codex') { [void](Get-CodexUsage (ProjectAcctDir $p 'codex')); $script:codexCtxByDir[(Get-NormPath $p.path)] } else { $null }
@@ -895,7 +979,7 @@ function Draw($projects, $cursor, $message) {
     $bottom += , @('Enter open  M move  R sync  X close', 'Gray', $null)
     $bottom += , @('D del A add G agent U account F diff W tree H hooks', 'Gray', $null)
     $bottom += , @("Shift+Up/Down reorder  T toast $(if (Test-Path $script:toastOff) { 'off' } else { 'on' })", 'Gray', $null)
-    $bottom += , @("P push/PR  / find  V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })", 'Gray', $null)
+    $bottom += , @("P push/PR  S agents  / find  V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })", 'Gray', $null)
     $bottom += , @("$($icon.changed)n changed $($icon.ahead)push $($icon.behind)pull $($icon.wtree)wt=worktree", 'DarkGray', $null)
     $bottom += , @("$($icon.compact)=compacts at", 'DarkGray', $null)
     $room = [math]::Max(0, $height + 1 - $bottom.Count)
@@ -1182,6 +1266,21 @@ while ($true) {
             'T' {
                 if (Test-Path $script:toastOff) { Remove-Item $script:toastOff -Force -ErrorAction SilentlyContinue; $message = 'Toasts on' }
                 else { Set-Content $script:toastOff (Get-Date).ToString('o'); $message = 'Toasts off' }
+            }
+            'S' {
+                if ($projects.Count) {
+                    $p = $projects[$cursor]
+                    $agent = Get-Agent $p
+                    if ($agent -notin 'claude', 'codex', 'agy') { $message = "$agent has no agents screen" }
+                    else {
+                        $acct = Get-ProjectAccount $p $agent
+                        $acctArg = ''
+                        if ($acct) { $acctArg = " -Account `"$acct`"" }
+                        $wtName = $p.name -replace ';', '\;'; $wtPath = $p.path -replace ';', '\;'
+                        Invoke-Wt "new-tab $script:wtProfile --title `"agents $wtName`" -d `"$wtPath`" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\agentsview.ps1`" -Path `"$wtPath`" -Agent $agent$acctArg"
+                        $message = "$agent agents for $($p.name) opened in a new tab"
+                    }
+                }
             }
             'P' {
                 if ($projects.Count) {

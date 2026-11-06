@@ -33,15 +33,23 @@ if ($dir) {
     $stateDir = Join-Path $PSScriptRoot 'state'
     New-Item -ItemType Directory -Force $stateDir | Out-Null
     $file = Join-Path $stateDir ((Get-StateKey $dir) + '.json')
+    # Like Claude's hooks: working -> idle becomes "done" (kept until the next working/waiting); activity_at is when
+    # the activity last changed, so the dashboard can show its age.
+    $prev = $null
+    try { $prev = Get-Content $file -Raw -ErrorAction Stop | ConvertFrom-Json } catch { }
+    $prevAct = if ($prev -and $prev.agent -eq 'agy') { [string]$prev.activity } else { '' }
+    if ($activity -eq 'idle' -and $prevAct -in 'working', 'waiting', 'done') { $activity = 'done' }
+    $actAt = if ($prev -and $prev.agent -eq 'agy' -and $prev.activity_at -and $prevAct -eq $activity) { [string]$prev.activity_at } else { (Get-Date).ToString('o') }
     $json = [pscustomobject]@{
-        dir        = $dir
-        agent      = 'agy'
-        model      = $data.model.display_name
-        ctx        = $ctx
-        quota_left = $quotaLeft
-        quotas     = $quotas
-        activity  = $activity
-        updated    = (Get-Date).ToString('o')
+        dir         = $dir
+        agent       = 'agy'
+        model       = $data.model.display_name
+        ctx         = $ctx
+        quota_left  = $quotaLeft
+        quotas      = $quotas
+        activity    = $activity
+        activity_at = $actAt
+        updated     = (Get-Date).ToString('o')
     } | ConvertTo-Json
     try {
         Set-Content "$file.$PID.tmp" $json -Encoding utf8 -ErrorAction Stop

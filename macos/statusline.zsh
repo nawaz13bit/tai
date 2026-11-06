@@ -5,8 +5,10 @@ raw="$(cat)"
 [[ -n "${raw//[[:space:]]/}" ]] || exit 0
 . "${0:A:h}/lib.zsh"
 
-user_settings="$HOME/.claude/settings.json"
-us="$(jq -c . "$user_settings" 2>/dev/null)" || us='{}'
+# A pane on another account (CLAUDE_CONFIG_DIR set by tai) has its own settings.json.
+user_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+[[ -f "$user_settings" ]] || user_settings="$HOME/.claude/settings.json"
+us="$(jq -c 'if type == "object" then . else {} end' "$user_settings" 2>/dev/null)" || us='{}'
 [[ -n "$us" ]] || us='{}'
 
 # Auto-compaction isn't sent on stdin; read the window (tokens) from user settings. Effort: what Claude Code

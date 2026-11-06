@@ -22,7 +22,7 @@ trap 'exit 0' HUP TERM
 start_agent() {   # resume|fresh
     agent_env "$agent"
     set_agent_account_env "$agent" "$(project_account "$path" "$agent")"   # read each launch, so U + restart picks it up
-    agent_args "$agent" "$1" "$name"   # fills ARGV from agents.json (the Claude --settings flag is Windows-only)
+    agent_args "$agent" "$1" "$name"   # fills ARGV from agents.json
     # Agents run slightly niced so the dashboard, tmux and the terminal stay responsive when the machine is busy
     # (raising the UI's own priority needs root). TAI_AGENT_NICE=0 turns it off; the default is 5.
     local n="${TAI_AGENT_NICE:-5}"
@@ -42,15 +42,16 @@ if ! installed "$agent"; then
     fi
     echo "'$agent' is not installed - using '$alt' instead."; sleep 2
     agent="$alt"
+    tmux set-option -p -t "$TMUX_PANE" @tai_agent "$agent" 2>/dev/null   # the dashboard shows what actually runs
 fi
 
-# Reads one key into $KEY ("up", "down", "enter", a digit, or "other"); returns 1 after 5 s without a key.
+# Reads one key into $KEY ("up", "down", "enter", a digit, or "other"); returns 1 after 3 s without a key.
 read_key() {
     local k rest
     IFS= read -rsn1 -t 3 k || return 1
     if [[ "$k" == $'\e' ]]; then
         IFS= read -rsn2 -t 0.05 rest
-        case "$rest" in '[A') KEY=up ;; '[B') KEY=down ;; *) KEY=other ;; esac
+        case "$rest" in '[A'|'OA') KEY=up ;; '[B'|'OB') KEY=down ;; *) KEY=other ;; esac
     elif [[ -z "$k" ]]; then KEY=enter
     else KEY="$k"; fi
 }

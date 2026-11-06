@@ -19,8 +19,8 @@ sel=1 top=0 H=40 W=$DASH_COLS FULL=1 NEED_GATHER=0
 MSG="CLIs found: ${INSTALLED[*]}"
 names=() paths=() agents=() order=() prev=() USAGE=()
 typeset -A SKEY P_pid P_since S_model S_eff S_ctx S_cmp S_quota S_act S_upd S_tr S_trm
-typeset -A H_st H_upd SUBN SHN G G_t GH P_id NOTIFIED
-now=0 last_ps=0 last_usage=0
+typeset -A H_st H_upd SUBN SHN G G_t GH P_id NOTIFIED P_ag S_aa CX_MT CX_CTX CX_EFF
+now=0 last_ps=0 last_usage=0 ST_STAT=idle
 
 size() {
     local s e=""
@@ -49,12 +49,21 @@ load() {
 
 # --- data gathering (runs about once a second) -----------------------------------------------------
 
+# jq -r <program> over many files. One corrupt file would make jq stop and hide every file after it, so on failure each
+# file is tried on its own (the repeated output of the good ones is harmless: the callers overwrite by key).
+jq_files() {
+    local prog=$1 f; shift
+    jq -r "$prog" "$@" 2>/dev/null && return 0
+    for f in "$@"; do jq -r "$prog" "$f" 2>/dev/null; done
+    return 0
+}
+
 gather() {
     now=$EPOCHSECONDS
-    local id pid p ag since f d m e c k q ac u t st v
-    P_pid=() P_since=() P_id=()
+    local id pid p ag since f d m e c k q ac u t st v aa
+    P_pid=() P_since=() P_id=() P_ag=()
     while IFS=$'\t' read -r id pid p ag since; do
-        P_pid[$p]=$pid; P_since[$p]=${since:-0}; P_id[$p]=$id
+        P_pid[$p]=$pid; P_since[$p]=${since:-0}; P_id[$p]=$id; P_ag[$p]=${ag:-claude}
     done < <(tmux list-panes -s -t "$SESSION" -F '#{pane_id}'$'\t''#{pane_pid}'$'\t''#{@tai_path}'$'\t''#{@tai_agent}'$'\t''#{@tai_since}' |
              awk -F'\t' '$3 != ""')
 
@@ -72,17 +81,18 @@ gather() {
         if [[ -f "$STATE_DIR/gh_${SKEY[$p]}.txt" ]]; then read -r v < "$STATE_DIR/gh_${SKEY[$p]}.txt"; GH[$p]=$v; fi
     done
 
-    S_model=() S_eff=() S_ctx=() S_cmp=() S_quota=() S_act=() S_upd=() S_tr=() S_trm=()
+    S_model=() S_eff=() S_ctx=() S_cmp=() S_quota=() S_act=() S_upd=() S_tr=() S_trm=() S_aa=()
     if ((${#sf})); then
-        while IFS=$'\t' read -r d m e c k q ac u t; do
+        while IFS=$'\t' read -r d m e c k q ac u t aa; do
             S_model[$d]=$m; S_eff[$d]=$e; S_ctx[$d]=$c; S_cmp[$d]=$k; S_quota[$d]=$q
-            S_act[$d]=$ac; S_upd[$d]=$u; S_tr[$d]=$t
-        done < <(jq -r '[(.dir // "-"), (.model // "-"), (.effort // "-"),
+            S_act[$d]=$ac; S_upd[$d]=$u; S_tr[$d]=$t; S_aa[$d]=$aa
+        done < <(jq_files '[(.dir // "-"), (.model // "-"), (.effort // "-"),
                          (if .ctx == null then "-" else (.ctx | round | tostring) end),
                          (if .compact == null then "-" else (.compact | round | tostring) end),
                          (if .quota_left == null then "-" else (.quota_left | round | tostring) end),
-                         (.activity // "-"), ((.updated_epoch // 0) | tostring), (.transcript // "-")] | @tsv' \
-                     "${sf[@]}" 2>/dev/null)
+                         (.activity // "-"), ((.updated_epoch // 0) | tostring), (.transcript // "-"),
+                         ((.activity_at_epoch // 0) | tostring)] | @tsv' \
+                     "${sf[@]}")
         for p in "${(@k)S_tr}"; do
             [[ "${S_tr[$p]}" != "-" ]] && S_trm[$p]="$(file_mtime "${S_tr[$p]}")"
         done
@@ -91,7 +101,7 @@ gather() {
     H_st=() H_upd=()
     if ((${#hf})); then
         while IFS=$'\t' read -r d st u; do H_st[$d]=$st; H_upd[$d]=$u; done < <(
-            jq -r '[(.dir // "-"), (.status // "-"), ((.updated_epoch // 0) | tostring)] | @tsv' "${hf[@]}" 2>/dev/null)
+            jq_files '[(.dir // "-"), (.status // "-"), ((.updated_epoch // 0) | tostring)] | @tsv' "${hf[@]}")
     fi
 
     notify_waiting
@@ -280,7 +290,7 @@ ident_update() {
     [[ -n "$who" ]] || return 0
     if [[ "$who" == "not logged in" ]]; then who+=" (the CLI will ask to sign in)"; IDENT_COL=$C_WORK
     elif [[ "$who" != "checking..." ]]; then
-        mine="$(account_identity "$a" "$acc")"
+        mine="$who"
         for o in ${(f)names}; do   # two accounts of one CLI that are the same login are almost always a setup mistake
             [[ "$o" != "$acc" && "$(account_identity "$a" "$o")" == "$mine" ]] && { who+="  = same as '$o'!"; IDENT_COL=$C_WORK; break; }
         done
@@ -288,9 +298,50 @@ ident_update() {
     IDENT="$a @$acc: $who"
 }
 
+# Codex has no transcript or status line. For each open Codex project this reads the newest rollout log of the project's
+# own account home (the newest 20 files): its last write time (stands in for a transcript, so a 'waiting' hook is
+# cleared once Codex resumes), the context used, and the effort from config.toml (top level only). Runs with the usage
+# refresh, about every 10 s.
+codex_scan() {
+    CX_MT=() CX_CTX=() CX_EFF=()
+    local p acct dir f cwd line cnt win pct toml re
+    local -a fl
+    local -A files_of
+    re='"total_tokens":([0-9]+)\},"model_context_window":([0-9]+)'
+    for p in "${(@k)P_ag}"; do
+        [[ "${P_ag[$p]}" == codex ]] || continue
+        acct="$(project_account "$p" codex)"; dir=""
+        [[ -n "$acct" ]] && dir="$(account_dir codex "$acct")"
+        dir="${dir:-$HOME/.codex}"
+        toml="$dir/config.toml"
+        if [[ -f "$toml" ]]; then
+            CX_EFF[$p]="$(sed -n -e '/^[[:space:]]*\[/q' -e 's/^[[:space:]]*model_reasoning_effort[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$toml" | head -n 1)"
+        fi
+        if (( ! ${+files_of[$dir]} )); then
+            fl=( $dir/sessions/**/rollout-*.jsonl(.Nom[1,20]) )
+            files_of[$dir]="${(F)fl}"
+        fi
+        for f in "${(@f)files_of[$dir]}"; do
+            [[ -n "$f" ]] || continue
+            cwd="$(head -c 3000 "$f" | grep -o '"cwd":"[^"]*"' | head -n 1)"
+            cwd="${cwd#\"cwd\":\"}"; cwd="${cwd%\"}"
+            [[ "${cwd%/}" == "${p%/}" ]] || continue
+            CX_MT[$p]="$(file_mtime "$f")"
+            line="$(tail -c 400000 "$f" | grep -o '"last_token_usage":{[^}]*"total_tokens":[0-9]*},"model_context_window":[0-9]*' | tail -n 1)"
+            if [[ "$line" =~ $re ]] && (( match[2] > 0 )); then
+                cnt=${match[1]} win=${match[2]}
+                pct=$(( (100 * cnt + win / 2) / win )); (( pct > 100 )) && pct=100
+                CX_CTX[$p]=$pct
+            fi
+            break   # newest log of this folder wins
+        done
+    done
+}
+
 usage_refresh() {
     last_usage=$now
     USAGE=()
+    codex_scan
     local -a u files w q sj lbl
     local pct rs i start f mins k ufile="$USAGE_FILE" cdir="$HOME/.codex"
     pick_accounts
@@ -360,29 +411,39 @@ age_text() {
 
 status_info() {
     local p=$1 since=${P_since[$p]:-} upd trm act hs hu sx ref
+    ST_STAT=closed
     if [[ -z "$since" ]]; then ST_SYM="·"; ST_TXT=""; ST_COL=$C_DIM; return; fi
     upd=${S_upd[$p]:-0} trm=${S_trm[$p]:-0} act=${S_act[$p]:--} hs=${H_st[$p]:--} hu=${H_upd[$p]:-0}
     local vs=0 vh=0
     ((upd >= since && upd > 0)) && vs=1
     ((hu >= since && hu > 0)) && vh=1
-    if ((!vs && !vh)); then ST_SYM="…"; ST_TXT="starting"; ST_COL=$C_START; return; fi
+    if ((!vs && !vh)); then ST_SYM="…"; ST_TXT="starting"; ST_COL=$C_START; ST_STAT=idle; return; fi
     sx=idle ref=$upd
     if ((vs)); then
         if ((trm > 0 && now - trm < 20)); then sx=working
         elif ((trm > upd)); then ref=$trm; fi
+        # A 'working' report from a non-Claude agent that went quiet for 3 minutes is stale (agy only writes when it
+        # redraws), so it counts as idle.
+        if [[ "$act" == working && "${P_ag[$p]:-claude}" != claude ]] && ((now - upd > 180)); then act=idle; fi
         case "$act" in
             waiting) sx=waiting ;;
             working) sx=working ;;
+            done)    sx=done ref=${S_aa[$p]:-0}; ((ref > 0)) || ref=$upd ;;
             idle)    sx=idle ref=$upd ;;
         esac
     fi
     if ((vh)); then
+        # No hook fires when a prompt is answered; a transcript write after it means the agent resumed. Codex has no
+        # transcript, so its newest rollout log write plays that part.
+        local wm=$trm
+        ((wm > 0)) || wm=${CX_MT[$p]:-0}
         case "$hs" in
-            waiting) ((trm > hu + 2)) || sx=waiting ;;   # the transcript moved on: it was answered
+            waiting) ((wm > hu + 2)) || sx=waiting ;;
             working) sx=working ;;
             done)    if [[ "$sx" != working && "$sx" != waiting ]]; then sx=done ref=$hu; fi ;;
         esac
     fi
+    ST_STAT=$sx
     case "$sx" in
         working) ST_SYM="◐"; ST_TXT="working";                       ST_COL=$C_WORK ;;
         waiting) ST_SYM="!"; ST_TXT="! waiting";                     ST_COL=$C_WAIT ;;
@@ -399,12 +460,22 @@ render() {
     now=$EPOCHSECONDS
     local -a body=() core=() keys=() bot=() frame=()
     local oi idx p ag lastag="" selfirst=0 sellast=0 mark st name max pad sp line t model eff ctx cmp qt sh sb g
-    local br wt ch ah bh gi gp
+    local br wt ch ah bh gi gp pa
+    local -A byag
+    local -a agord=()
+    local n_open=0 n_work=0 n_wait=0 n_idle=0
     for ((oi = 1; oi <= ${#order}; oi++)); do
         idx=${order[oi]}; p=${paths[idx]}; ag=${agents[idx]/#-/claude}
         if [[ "$ag" != "$lastag" ]]; then body+=("${C_HEAD}-- $ag --${C_RST}"); lastag=$ag; fi
         ((oi == sel)) && selfirst=${#body}
         status_info "$p"
+        if [[ -n "${P_pid[$p]:-}" ]]; then   # count open agents by state and CLI for the summary line
+            n_open=$((n_open + 1))
+            case "$ST_STAT" in working) n_work=$((n_work + 1)) ;; waiting) n_wait=$((n_wait + 1)) ;; *) n_idle=$((n_idle + 1)) ;; esac
+            pa=${P_ag[$p]:-claude}
+            if (( ! ${+byag[$pa]} )); then agord+=("$pa"); byag[$pa]=0; fi
+            byag[$pa]=$((byag[$pa] + 1))
+        fi
         mark=" "; ((oi == sel)) && mark="▸"
         st=$ST_TXT; name=${names[idx]}
         max=$((W - 5 - ${#st})); ((max < 4)) && max=4
@@ -416,8 +487,13 @@ render() {
         body+=("$line")
         if [[ -n "${P_pid[$p]:-}" ]]; then
             model=${S_model[$p]:--}; eff=${S_eff[$p]:--}; ctx=${S_ctx[$p]:--}; cmp=${S_cmp[$p]:--}; qt=${S_quota[$p]:--}
-            if [[ "$model" != "-" ]]; then
-                t=$model; [[ "$eff" != "-" ]] && t+=" · $eff"
+            if [[ "${P_ag[$p]:-claude}" == codex ]]; then   # Codex has no status line: effort from config.toml, ctx from its rollout log
+                [[ "$eff" == "-" && -n "${CX_EFF[$p]:-}" ]] && eff=${CX_EFF[$p]}
+                [[ "$ctx" == "-" && -n "${CX_CTX[$p]:-}" ]] && ctx=${CX_CTX[$p]}
+            fi
+            if [[ "$model" != "-" || "$eff" != "-" ]]; then
+                t=$model; [[ "$model" == "-" ]] && t="--"
+                [[ "$eff" != "-" ]] && t+=" · $eff"
                 body+=("    ${C_ACC}${t:0:$((W - 5))}${C_RST}")
             fi
             t=""
@@ -468,13 +544,21 @@ render() {
     keys+=("${C_HEAD}-- keys --${C_RST}"
            "${C_DIM}↑↓ select  ⏎ open  X close${C_RST}"
            "${C_DIM} D remove  A add  G cli${C_RST}"
-           "${C_DIM}⇧↑↓ reorder  F diff  W tree${C_RST}"
-           "${C_DIM} P push/PR  / find  V view${C_RST}"
+           "${C_DIM}⇧↑↓ reorder  F diff  V view${C_RST}"
+           "${C_DIM} P push/PR  W tree  S agents  / find${C_RST}"
            "${C_DIM} T toasts  U account  H hooks  M+arrow move  Q quit${C_RST}"
            "${C_DIM}◐ work  ! wait  ✓ done  ○ idle${C_RST}"
            "${C_DIM}▶ shells  ◈ sub-agents  Alt+D${C_RST}")
     local room=$((H - 6))
     local -a use=("${USAGE[@]}")
+    if ((n_open)); then   # one-line summary of all open agents
+        local per="" a_ ac_=$C_DIM sum
+        for a_ in "${agord[@]}"; do per+="${per:+, }${byag[$a_]} $a_"; done
+        ((n_work)) && ac_=$C_WORK
+        ((n_wait)) && ac_=$C_WAIT
+        sum="agents: $n_open open ($per) - $n_work working, $n_wait waiting, $n_idle idle"
+        use+=("${ac_}${sum:0:$((W - 1))}${C_RST}")
+    fi
     if ((${#core} + ${#use} + ${#keys} > room)); then keys=(); fi
     if ((${#core} + ${#use} > room)); then use=(); fi
     bot=("${core[@]}")
@@ -704,6 +788,13 @@ while true; do
                 cmd="git -C ${(q)paths[cur]} -c color.ui=always -c core.pager='less -R' diff HEAD --stat --patch || { echo 'git diff failed (not a repo?)'; sleep 2; }"
                 tmux new-window -n "diff ${names[cur]}" -c "${paths[cur]}" "$cmd"
                 MSG="Diff of ${names[cur]} opened in a new window (q closes it)" ;;
+            s|S)   # agents screen of the selected project, in its own tmux window, on the project's account
+                ((n)) || continue
+                a="${agents[cur]/#-/claude}"
+                acct_s="$(project_account "${paths[cur]}" "$a")"
+                cmd="${(q)TAI_DIR}/agentsview.zsh ${(q)paths[cur]} ${(q)a} ${(q)acct_s}"
+                tmux new-window -n "agents ${names[cur]}" -c "${paths[cur]}" "$cmd"
+                MSG="Agents of ${names[cur]} opened in a new window (q closes it)" ;;
             p|P)
                 ((n)) || continue
                 publish_flow "${names[cur]}" "${paths[cur]}"

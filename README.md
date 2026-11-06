@@ -60,6 +60,9 @@ Licensed under the MIT License (see `LICENSE`).
 - `A` add, `D` delete, `G` change agent, `U` change account (closed projects only; see Accounts), `M` + arrow move a pane.
 - `F` opens `git diff HEAD` of the selected project in a new Windows Terminal tab (`windows/diffview.ps1`; `q` leaves git's pager, then any key closes the tab, so short or empty diffs stay visible).
 - `W` creates a git worktree for the selected project.
+- `S` opens an agents screen for the selected project in a new Windows Terminal tab (`windows/agentsview.ps1`); on Linux/macOS
+  it opens a new tmux window (`agentsview.sh` / `agentsview.zsh`, `q` closes it).
+  The bottom block ends with a one-line count: `agents: N open (…) - W working, X waiting, I idle`.
 - `T` turns "needs you" toasts on or off. The choice is the file `windows/state/toast.off` and survives restarts;
   waiting states are still recorded while off, so turning toasts back on doesn't replay old prompts.
 - `P` commits all changes (asks for a message), pushes the branch, and offers `gh pr create --fill` when `gh` is installed
@@ -68,7 +71,7 @@ Licensed under the MIT License (see `LICENSE`).
 - `V` toggles a live preview under the list. Windows shows the last reply of a Claude session (read from its transcript);
   Linux shows the last lines of the pane's screen for any CLI. Flag file `preview.on` in the state folder.
 
-The Linux and macOS ports have the same keys (macOS is zsh, checked with `zsh -n` only once run on a Mac; until then unchecked): Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`), `U` (account, see Accounts), `H` (hook installer, same as Windows; files in `generated/`, answers in `state/hooks-install.json`), `R` (reload config and refresh usage). Agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off). They are syntax-checked only (`bash -n`), not yet run on a real machine.
+The Linux and macOS ports have the same keys (macOS is zsh, checked with `zsh -n` only once run on a Mac; until then unchecked): Shift+Up/Down reorder, `P`, `/`, `V`, `F` (diff in a new tmux window, `q` closes it), `S` (agents screen in a new tmux window; Claude sessions via `claude agents --json`, Codex/others show tai's own panes), `W` (worktree), `T` (toasts via `notify-send`/`osascript`, flag file `~/.config/tai/state/toast.off`), `U` (account, see Accounts), `H` (hook installer, same as Windows; files in `generated/`, answers in `state/hooks-install.json`), `R` (reload config and refresh usage). Agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off). They are syntax-checked only (`bash -n`), not yet run on a real machine.
 
 ## Accounts (Windows, Linux, macOS; Claude and Codex only)
 

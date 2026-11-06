@@ -24,6 +24,13 @@ if (-not (Test-Path -LiteralPath $settings)) {
     } catch { }
 }
 
+# Writes the slot file through a temp file, so the dashboard never reads it half written (and sees the slot as free).
+function Write-SlotFile($Json) {
+    $tmp = "$running.$PID.tmp"
+    Set-Content $tmp $Json -Encoding utf8 -ErrorAction Stop
+    Move-Item $tmp $running -Force -ErrorAction Stop
+}
+
 # Heartbeat: lets the dashboard notice when this pane's window is closed and drop it from the layout.
 [pscustomobject]@{ slot = $Slot; pid = $PID; since = (Get-Date).ToString('o') } |
     ConvertTo-Json | Set-Content (Join-Path $stateDir "slot$Slot.pane") -Encoding utf8
@@ -38,11 +45,14 @@ while ($true) {
 
     try { $job = Get-Content $assign -Raw -ErrorAction Stop | ConvertFrom-Json }
     catch { Start-Sleep -Milliseconds 300; continue }   # unreadable: retry on the next pass
-    Remove-Item $assign -Force
-    if (-not $job.path) { continue }
+    if (-not $job.path) { Remove-Item $assign -Force; continue }
     # pid lets the dashboard find and stop Claude when the user closes the project.
-    [pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $job.agent; pid = $PID; since = (Get-Date).ToString('o') } |
-        ConvertTo-Json | Set-Content $running -Encoding utf8
+    # The slot file is written before the assignment is removed: otherwise the dashboard can see this slot as free in between
+    # and give it to another project (restore race).
+    $slotJson = [pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $job.agent; pid = $PID; since = (Get-Date).ToString('o') } | ConvertTo-Json
+    try { Write-SlotFile $slotJson }
+    catch { Start-Sleep -Milliseconds 300; continue }   # not written: keep the assignment and retry on the next pass
+    Remove-Item $assign -Force
 
     # The window title follows the focused pane, so it shows the project; Sync-Layout maps the name back to this slot.
     $Host.UI.RawUI.WindowTitle = [string]$job.name
@@ -61,8 +71,9 @@ while ($true) {
         Start-Sleep -Seconds 2
         $agent = $alt
         # Tell the dashboard what actually runs here so it shows the right info.
-        [pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $agent; pid = $PID; since = (Get-Date).ToString('o') } |
-            ConvertTo-Json | Set-Content $running -Encoding utf8
+        try {
+            Write-SlotFile ([pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $agent; pid = $PID; since = (Get-Date).ToString('o') } | ConvertTo-Json)
+        } catch { }
     }
     Remove-Item $closeFlag -Force -ErrorAction SilentlyContinue
     # A missing folder must not start the CLI in tai's own directory; [ ] in a path are not wildcards.
@@ -158,8 +169,9 @@ while ($true) {
                 $agent = ($choices[$pick] -replace '^Switch to ', '')
                 Set-ProjectAgent $job.path $agent
                 # Tell the dashboard what runs here now.
-                [pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $agent; pid = $PID; since = (Get-Date).ToString('o') } |
-                    ConvertTo-Json | Set-Content $running -Encoding utf8
+                try {
+                    Write-SlotFile ([pscustomobject]@{ slot = $Slot; name = $job.name; path = $job.path; agent = $agent; pid = $PID; since = (Get-Date).ToString('o') } | ConvertTo-Json)
+                } catch { }
             }
             Clear-Host
         }
