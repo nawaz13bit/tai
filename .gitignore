@@ -23,5 +23,7 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+# PowerShell module cache that lands in the working folder
+/Microsoft/
 linux/generated/
 macos/generated/
