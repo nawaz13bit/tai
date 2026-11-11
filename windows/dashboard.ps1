@@ -19,6 +19,7 @@ $icon = @{
     compact = [string][char]0x21E3   # down dashed arrow
     shell   = [string][char]0x25B6   # play triangle
     sub     = [string][char]0x25C8   # diamond in diamond
+    deleg   = [string][char]0x21C4   # two arrows (a running `tai delegate`)
     changed = [string][char]0x25CF   # filled dot
     ahead   = [string][char]0x2191   # up arrow
     behind  = [string][char]0x2193   # down arrow
@@ -409,6 +410,26 @@ function Notify-Waiting($projects) {
     $script:notifySeeded = $true
 }
 
+# Running `tai delegate` hand-offs of a project: delegate.ps1 keeps <project>\.tai\running-<target>.lock (pid + start time)
+# while the target works. A lock whose process is gone, or that is older than 2 hours, is ignored. Text like "codex 0:42".
+function Get-DelegationText($path) {
+    $out = @()
+    try {
+        $dir = Join-Path $path '.tai'
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return '' }
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'running-*.lock' -File -ErrorAction SilentlyContinue)) {
+            $l = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
+            if (-not $l.pid -or -not (Get-Process -Id ([int]$l.pid) -ErrorAction SilentlyContinue)) { continue }
+            $secs = ((Get-Date) - [datetime]$l.since).TotalSeconds
+            if ($secs -lt 0 -or $secs -gt 7200) { continue }
+            $target = $f.BaseName -replace '^running-', ''
+            $out += ('{0} {1}:{2:00}' -f $target, [int][math]::Floor($secs / 60), [int]($secs % 60))
+        }
+    } catch { }
+    if ($out.Count) { return "  $($icon.deleg) " + ($out -join ', ') }
+    return ''
+}
+
 # Sub-agents running inside a project's session (SubagentStart/SubagentStop hooks, see hook.ps1).
 # Entries from before the pane started, or older than half an hour (a stop that never came), are ignored.
 function Get-SubCount($project, $slot) {
@@ -677,6 +698,18 @@ function Wrap-Text($text, $w, $max) {
     return , $rows
 }
 
+# Packs whole items (never split mid-item) onto rows no wider than $w, separated by two spaces.
+function Pack-Items($items, $w) {
+    $rows = @(); $cur = ''
+    foreach ($it in $items) {
+        if ($cur -and ($cur.Length + 2 + $it.Length) -gt $w) { $rows += $cur; $cur = $it }
+        elseif ($cur) { $cur += '  ' + $it }
+        else { $cur = $it }
+    }
+    if ($cur) { $rows += $cur }
+    return , $rows
+}
+
 # /: incremental find. Typing moves the cursor to the first project whose name contains the text; Tab / Down
 # go to the next match, Up to the previous, Enter keeps the spot, Esc goes back. Nothing is hidden or saved.
 function Find-Project($projects, $cursor) {
@@ -718,10 +751,18 @@ function ProjectAcctDir($p, $agent) {
 
 function Draw($projects, $cursor, $message) {
     Refresh-RepoInfo $projects
-    $slots = Get-Slots
-    $statuses = Get-Statuses
-    $hooks = Get-Hooks
-    $shells = Get-ShellCounts $slots
+    # A redraw caused by a key (cursor move) reuses the data read a moment ago: only the highlight changed, and
+    # re-reading every state file per key press is what made the highlighter lag.
+    $snap = $script:drawSnap
+    if ($script:keyRedraw -and $snap -and ((Get-Date) - $snap.time).TotalSeconds -lt 1.5) {
+        $slots = $snap.slots; $statuses = $snap.statuses; $hooks = $snap.hooks; $shells = $snap.shells
+    } else {
+        $slots = Get-Slots
+        $statuses = Get-Statuses
+        $hooks = Get-Hooks
+        $shells = Get-ShellCounts $slots
+        $script:drawSnap = @{ time = Get-Date; slots = $slots; statuses = $statuses; hooks = $hooks; shells = $shells }
+    }
     $width = [Console]::WindowWidth - 1
     $height = [Console]::WindowHeight - 1
     $lines = @()   # each: text, fg, bg
@@ -742,7 +783,11 @@ function Draw($projects, $cursor, $message) {
         $uFile = Join-Path $PSScriptRoot ('usage-' + ((Split-Path $acctDir['claude'].TrimEnd('/', '\') -Leaf).ToLower() -replace '[^a-z0-9]', '_') + '.json')
     }
     $u = $null
-    try { if (Test-Path $uFile) { $u = Get-Content $uFile -Raw -ErrorAction Stop | ConvertFrom-Json } } catch { $u = $null }
+    if ($script:keyRedraw -and $script:usageSnap -and $script:usageSnap.file -eq $uFile -and ((Get-Date) - $script:usageSnap.time).TotalSeconds -lt 1.5) { $u = $script:usageSnap.data }
+    else {
+        try { if (Test-Path $uFile) { $u = Get-Content $uFile -Raw -ErrorAction Stop | ConvertFrom-Json } } catch { $u = $null }
+        $script:usageSnap = @{ file = $uFile; time = Get-Date; data = $u }
+    }
     # Usage rows shown under each agent's heading: Claude's from usage.json, Codex's from its session logs,
     # agy's lowest model quota from its status line.
     function UsageLinesFor($agent) {
@@ -798,12 +843,22 @@ function Draw($projects, $cursor, $message) {
         $usageBlock += , @($hd, 'Cyan', $null)
         foreach ($ul in (UsageLinesFor $a)) { $usageBlock += , $ul }
     }
-    # One-line summary of all open agents.
-    $ac = Get-AgentCounts $slots $statuses $hooks $projects
+    # Summary of all open agents, in its own section below the per-agent usage and above the keys.
+    $agentsBlock = @()
+    $ac =Get-AgentCounts $slots $statuses $hooks $projects
     if ($ac.open) {
         $per = ($ac.by.Keys | ForEach-Object { "$($ac.by[$_]) $_" }) -join ', '
-        $usageBlock += , @("agents: $($ac.open) open ($per) - $($ac.working) working, $($ac.waiting) waiting, $($ac.idle) idle", $(if ($ac.waiting) { 'Magenta' } elseif ($ac.working) { 'Yellow' } else { 'Gray' }), $null)
+        $acColor = if ($ac.waiting) { 'Magenta' } elseif ($ac.working) { 'Yellow' } else { 'Gray' }
+        $acRows = Pack-Items @("agents: $($ac.open) open ($per)", "$($ac.working) working,", "$($ac.waiting) waiting,", "$($ac.idle) idle") $width
+        $agentsBlock += , @('-- agents --', 'Cyan', $null)
+        foreach ($r in $acRows) { $agentsBlock += , @($r, $acColor, $null) }
     }
+    # Key help, wrapped to the window width (whole shortcuts per row).
+    $keyItems = @('Enter open', 'M move', 'R sync', 'X close', 'D del', 'A add', 'G agent', 'U account', 'F diff', 'W tree', 'H hooks',
+        'Shift+Up/Down reorder', "T toast $(if (Test-Path $script:toastOff) { 'off' } else { 'on' })", 'P push/PR', 'S agents', '/ find',
+        "V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })")
+    $keyRows = Pack-Items $keyItems $width
+    $legendRows = Pack-Items @("$($icon.changed)n changed", "$($icon.ahead)push", "$($icon.behind)pull", "$($icon.wtree)wt=worktree", "$($icon.compact)=compacts at") $width
 
     # Reserve room for the detail block and key help; scroll the project list to fit.
     # Preview rows (V): header plus up to 4 wrapped lines of the selected pane's latest reply.
@@ -819,11 +874,11 @@ function Draw($projects, $cursor, $message) {
             $head = '-- last reply --'
             if ($pv -and $pv.tool) { $head = "-- running $($pv.tool) --" }
             $previewRows += , @($head, 'Cyan', $null)
-            if ($pv -and $pv.text) { foreach ($r in (Wrap-Text $pv.text ([math]::Max(10, $width - 2)) 4)) { $previewRows += , @("  $r", 'Gray', $null) } }
+            if ($pv -and $pv.text) { foreach ($r in (Wrap-Text $pv.text ([math]::Max(10, $width - 2)) 8)) { $previewRows += , @("  $r", 'Gray', $null) } }
             else { $previewRows += , @('  (nothing yet)', 'DarkGray', $null) }
         }
     }
-    $detailHeight = 10 + $usageBlock.Count + $previewRows.Count   # separator, path, model/hint, message (4), usage block, keys section (6), preview
+    $detailHeight = 4 + $usageBlock.Count + $agentsBlock.Count +$previewRows.Count + 1 + $keyRows.Count + $legendRows.Count   # separator, path, model/hint, message, usage block, preview, keys header + wrapped keys + legend
     $listHeight = [math]::Max(3, $height + 1 - $lines.Count - $detailHeight)
     # Open projects take three rows (model and effort, then context and compaction), so scroll by rows.
     function IsGroupStart($i) { $i -eq 0 -or (Get-Agent $projects[$i]) -ne (Get-Agent $projects[$i - 1]) }
@@ -912,6 +967,7 @@ function Draw($projects, $cursor, $message) {
         $subText = if ($subN) { "  $($icon.sub) $subN" } else { '' }
         if (-not (HasInfo $i)) { $rowShells += $subText }
         $text = '{0} {1,-12} {2,-3} {3}{4}{5}' -f $pointer, $shown, $slotText, $state, $tag, $rowShells
+        if ($slot) { $text += Get-DelegationText $p.path }   # a delegation runs from an open agent, so only open rows can have one
         # Selected row is white on blue (dark magenta when it needs you) so it stays readable.
         $bg = if ($i -ne $cursor) { $null } elseif ($fg -eq 'Magenta') { 'DarkMagenta' } else { 'DarkBlue' }
         $lines += , @($text, $(if ($i -eq $cursor) { 'White' } else { $fg }), $bg)
@@ -974,14 +1030,11 @@ function Draw($projects, $cursor, $message) {
     $bottom += , @($message, 'Yellow', $null)
     foreach ($pr in $previewRows) { $bottom += , $pr }
     foreach ($ul in $usageBlock) { $bottom += , $ul }
+    foreach ($al in $agentsBlock) { $bottom += , $al }
     # One status line on the last row: keys, then the git/compact symbol legend (cut off by width if needed).
     $bottom += , @('-- keys --', 'Cyan', $null)
-    $bottom += , @('Enter open  M move  R sync  X close', 'Gray', $null)
-    $bottom += , @('D del A add G agent U account F diff W tree H hooks', 'Gray', $null)
-    $bottom += , @("Shift+Up/Down reorder  T toast $(if (Test-Path $script:toastOff) { 'off' } else { 'on' })", 'Gray', $null)
-    $bottom += , @("P push/PR  S agents  / find  V preview $(if (Test-Path $script:previewOn) { 'on' } else { 'off' })", 'Gray', $null)
-    $bottom += , @("$($icon.changed)n changed $($icon.ahead)push $($icon.behind)pull $($icon.wtree)wt=worktree", 'DarkGray', $null)
-    $bottom += , @("$($icon.compact)=compacts at", 'DarkGray', $null)
+    foreach ($r in $keyRows) { $bottom += , @($r, 'Gray', $null) }
+    foreach ($r in $legendRows) { $bottom += , @($r, 'DarkGray', $null) }
     $room = [math]::Max(0, $height + 1 - $bottom.Count)
     $lines = @($lines | Select-Object -First $room)
     while ($lines.Count -lt $room) { $lines += , @('', 'Gray', $null) }
@@ -1049,6 +1102,8 @@ $lastDraw = [datetime]::MinValue
 $lastPaneCheck = [datetime]::MinValue
 $dirty = $true
 $follow = $null
+$lastFocusCheck = [datetime]::MinValue
+$lastFocusTitle = ''
 $lastSize = ''
 while ($true) {
   # One bad tick (a half-read file, a failed wt call) must not kill the dashboard: log it and carry on.
@@ -1096,6 +1151,31 @@ while ($true) {
         }
     }
 
+    # Focus moved to a pane: put the highlight on that pane's project. The window title follows the focused pane;
+    # only a change of title moves the cursor, so arrow keys on the dashboard are never fought.
+    if (((Get-Date) - $lastFocusCheck).TotalSeconds -ge 0.7 -and -not $restore.Count) {
+        $lastFocusCheck = Get-Date
+        try {
+            $ft = Get-FocusedTitle
+            if ($ft -and $ft -ne $lastFocusTitle) {
+                $lastFocusTitle = $ft
+                if ($ft -notmatch '^dashboard') {
+                    $n = $null
+                    if ($ft -match '^pane (\d)$') { $n = [int]$Matches[1] } else { $byName = Get-SlotNames; if ($null -ne $byName[$ft]) { $n = [int]$byName[$ft] } }
+                    if ($n) {
+                        $sf = Join-Path $stateDir "slot$n.json"
+                        if (-not (Test-Path $sf)) { $sf = Join-Path $stateDir "slot$n.assign" }
+                        $sp = Get-Content $sf -Raw -ErrorAction Stop | ConvertFrom-Json
+                        $np = Get-NormPath $sp.path
+                        for ($i = 0; $i -lt $projects.Count; $i++) {
+                            if ((Get-NormPath $projects[$i].path) -eq $np) { if ($cursor -ne $i) { $cursor = $i; $dirty = $true }; break }
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
     # Reopen last session's projects in one go: the assignments are written first, every split goes into a
     # single wt command line, and the panes start in parallel.
     if ($restore.Count) {
@@ -1140,7 +1220,17 @@ while ($true) {
         $message = ''
         switch ($key.Key) {
             'UpArrow' {
-                if ($key.Modifiers -band [ConsoleModifiers]::Shift) {
+                # Held-key repeats queue up: fold the plain Up/Down presses already waiting into one move and draw once.
+                if (-not ($key.Modifiers -band [ConsoleModifiers]::Shift) -and $projects.Count) {
+                    $steps = -1
+                    while ([Console]::KeyAvailable) {
+                        $nk = [Console]::ReadKey($true)
+                        if ($nk.Modifiers -band [ConsoleModifiers]::Shift) { break }
+                        if ($nk.Key -eq 'UpArrow') { $steps-- } elseif ($nk.Key -eq 'DownArrow') { $steps++ } else { break }
+                    }
+                    $cursor = (($cursor + $steps) % $projects.Count + $projects.Count) % $projects.Count
+                }
+                elseif ($key.Modifiers -band [ConsoleModifiers]::Shift) {
                     if ($projects.Count) {
                         # The two swap places in the sorted list, so the cursor moves with the project before the redraw.
                         if (Move-ProjectOrder $projects $cursor -1) { $cursor-- } else { $message = 'Already first in its group' }
@@ -1149,7 +1239,16 @@ while ($true) {
                 elseif ($projects.Count) { $cursor = ($cursor - 1 + $projects.Count) % $projects.Count }
             }
             'DownArrow' {
-                if ($key.Modifiers -band [ConsoleModifiers]::Shift) {
+                if (-not ($key.Modifiers -band [ConsoleModifiers]::Shift) -and $projects.Count) {
+                    $steps = 1
+                    while ([Console]::KeyAvailable) {
+                        $nk = [Console]::ReadKey($true)
+                        if ($nk.Modifiers -band [ConsoleModifiers]::Shift) { break }
+                        if ($nk.Key -eq 'UpArrow') { $steps-- } elseif ($nk.Key -eq 'DownArrow') { $steps++ } else { break }
+                    }
+                    $cursor = (($cursor + $steps) % $projects.Count + $projects.Count) % $projects.Count
+                }
+                elseif ($key.Modifiers -band [ConsoleModifiers]::Shift) {
                     if ($projects.Count) {
                         if (Move-ProjectOrder $projects $cursor 1) { $cursor++ } else { $message = 'Already last in its group' }
                     }
@@ -1305,21 +1404,50 @@ while ($true) {
                 if ($projects.Count -gt 1) { $cursor = Find-Project $projects $cursor }
             }
             'W' {
-                # New git worktree on a new branch, added to the project list as its own project.
+                # Git worktree of a branch, listed as its own project right below the project it came from.
+                # A new branch gets a new worktree; an existing branch reuses its worktree (or gets one if it has none).
                 if ($projects.Count) {
                     $p = $projects[$cursor]
                     Clear-Host
-                    $branch = (Read-Host "New branch for a worktree of '$($p.name)' (blank cancels)").Trim()
+                    $branch = (Read-Host "Branch for a worktree of '$($p.name)' (new or existing, blank cancels)").Trim()
                     if ($branch) {
                         $safe = $branch -replace '[^\w.-]', '-'
                         $dir = (Split-Path $p.path -Parent) + '\' + (Split-Path $p.path -Leaf) + '-' + $safe
-                        $out = & git -C $p.path worktree add -b $branch $dir 2>&1
-                        if ($LASTEXITCODE -eq 0) {
+                        # Worktree that already has this branch checked out (git worktree list --porcelain: "worktree <path>" then "branch refs/heads/<name>").
+                        $existing = $null
+                        $wtPath = $null
+                        foreach ($l in (git -C $p.path worktree list --porcelain 2>$null)) {
+                            if ($l -like 'worktree *') { $wtPath = $l.Substring(9) }
+                            elseif ($l -eq "branch refs/heads/$branch") { $existing = $wtPath }
+                        }
+                        $ok = $true
+                        $out = $null
+                        if ($existing) { $dir = $existing.Replace('/', '\') }
+                        else {
+                            $null = & git -C $p.path show-ref --verify --quiet "refs/heads/$branch" 2>&1
+                            if ($LASTEXITCODE -eq 0) { $out = & git -C $p.path worktree add $dir $branch 2>&1 }
+                            else { $out = & git -C $p.path worktree add -b $branch $dir 2>&1 }
+                            $ok = ($LASTEXITCODE -eq 0)
+                        }
+                        if ($ok) {
                             try {
-                                $projects = @(Add-Projects $projects @($dir) $null)
-                                Save-Projects $projects
-                                $follow = $projects[$projects.Count - 1].name
-                                $message = "Worktree $safe added"
+                                $listed = @($projects | Where-Object { (Get-NormPath $_.path) -eq (Get-NormPath $dir) }) | Select-Object -First 1
+                                if ($listed) {
+                                    $follow = $listed.name
+                                    $message = "Branch $branch is already listed as $($listed.name)"
+                                } else {
+                                    $projects = @(Add-Projects $projects @($dir) $null)
+                                    $new = $projects[$projects.Count - 1]
+                                    # Same CLI as the project it came from (the list is grouped by CLI), and placed right below it.
+                                    if ($p.agent) { $new | Add-Member -NotePropertyName agent -NotePropertyValue $p.agent -Force }
+                                    $rest = @($projects | Select-Object -First ($projects.Count - 1))
+                                    $at = 0
+                                    for ($i = 0; $i -lt $rest.Count; $i++) { if ($rest[$i].name -eq $p.name) { $at = $i + 1; break } }
+                                    $projects = @($rest | Select-Object -First $at) + $new + @($rest | Select-Object -Skip $at)
+                                    Save-Projects $projects
+                                    $follow = $new.name
+                                    $message = if ($existing) { "Existing worktree of $branch added" } else { "Worktree $safe added" }
+                                }
                             } catch { $message = $_.Exception.Message }
                         } else { $message = ([string]($out | Select-Object -Last 1)) }
                     }

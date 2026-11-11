@@ -5,18 +5,24 @@
     "fresh": ["--remote-control", "{name}"],
     "settingsFlag": "--settings",
     "configEnv": "CLAUDE_CONFIG_DIR",
-    "defaultDir": "~/.claude"
+    "defaultDir": "~/.claude",
+    "delegateHint": { "flag": "--append-system-prompt-file", "file": true, "resumeArgs": ["--system-prompt-snapshot", "off"] },
+    "headless": { "args": [], "readonly": ["--permission-mode", "plan"], "edit": ["--permission-mode", "acceptEdits"], "allowFlag": "--allowedTools", "defaultAllow": ["Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git --version)"],"prompt": ["-p"] }
   },
   "codex": {
     "exe": "codex",
     "configEnv": "CODEX_HOME",
     "defaultDir": "~/.codex",
     "args": ["--no-alt-screen"],
-    "resume": ["resume", "--last"]
+    "resume": ["resume", "--last"],
+    "delegateHint": { "flag": "-c", "value": "developer_instructions='{text}'" },
+    "headless": { "args": ["exec", "--skip-git-repo-check", "--color", "never"], "readonly": ["-s", "read-only"], "edit": ["-s", "workspace-write"], "prompt": [] }
   },
   "agy": {
     "exe": "agy",
-    "resume": ["--continue"]
+    "resume": ["--continue"],
+    "delegateHint": { "flag": "-i", "value": "{text}", "suffix": "This message is background information, not a task: do not run any tools, and reply with only the word ok." },
+    "headless": { "args": [], "readonly": ["--mode", "accept-edits"], "readonlyDeny": ["write_file(*)"], "edit": ["--mode", "accept-edits"], "settingsFlag": "--settings", "defaultAllow": ["command(regex:git (status|log|diff|show|--version).*)"],"prompt": ["-p"] }
   },
   "opencode": {
     "exe": "opencode",

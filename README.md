@@ -34,7 +34,8 @@ Windows hook/statusline settings reference `windows/*.ps1` by absolute path; Lin
   e.g. `C:/%username%/terminal_ai` if you cloned it to `C:\%username%\terminal_ai`; replace `%username%` with your real
   folder name).
   The example is the tracked template; `claude-settings.json` is the git-ignored copy actually in use. Delete it to
-  regenerate. Press `H` in the dashboard to install them for you: for each installed CLI (Codex, Qwen, Cursor,
+  regenerate. (On Linux and macOS there is no example: `linux/claude-settings.json` and `macos/claude-settings.json`
+  are tracked and edited directly.) Press `H` in the dashboard to install them for you: for each installed CLI (Codex, Qwen, Cursor,
   Copilot) it asks y/N, copies your existing config to `*.tai-backup-<time>`, adds only tai's hook entries (nothing
   else is changed; running it twice adds nothing) and remembers the answer in `state/hooks-install.json`. Codex still
   needs `[features] hooks = true` in `~/.codex/config.toml`. Qwen/Cursor/Copilot formats are unconfirmed. By hand
@@ -54,10 +55,15 @@ Licensed under the MIT License (see `LICENSE`).
 
 ## Dashboard keys (Windows)
 
-- `Enter` opens the selected project; `Up` / `Down` move the highlight.
+- `Enter` opens the selected project (or focuses its pane if already open); `Up` / `Down` move the highlight (a held key is folded into one move per redraw, so it stays smooth).
+  The highlight also follows pane focus: click or move into a project's pane and the dashboard selects that project.
+- A running `tai delegate` shows as `⇄ codex 1:15` at the end of the project's row (see Delegate).
+- `X` closes the selected project and its pane (asks y/N; a reply in progress is cut off). `R` re-reads the pane layout
+  (use it after moving panes by hand). `H` installs tai's hooks into the other CLIs' configs (see Quick start).
 - `Shift+Up` / `Shift+Down` reorder the selected project within its agent group; the highlight follows it and the
   order is saved to `projects.json` (entries for the other OS keep their place).
-- `A` add, `D` delete, `G` change agent, `U` change account (closed projects only; see Accounts), `M` + arrow move a pane.
+- `A` add, `D` delete (open projects must be closed with `X` first), `G` change agent, `U` change account (closed projects only; see Accounts).
+- `M` then an arrow key moves the selected project's pane in that direction.
 - `F` opens `git diff HEAD` of the selected project in a new Windows Terminal tab (`windows/diffview.ps1`; `q` leaves git's pager, then any key closes the tab, so short or empty diffs stay visible).
 - `W` creates a git worktree for the selected project.
 - `S` opens an agents screen for the selected project in a new Windows Terminal tab (`windows/agentsview.ps1`); on Linux/macOS
@@ -110,7 +116,27 @@ config folder, so a pane on another account just gets `CLAUDE_CONFIG_DIR` / `COD
 - Qwen's `Stop` hook reports `context_usage`, so the dashboard shows a ctx value for Qwen.
 - Copilot starts with `--no-alt-screen` and opencode with `OPENCODE_DISABLE_TERMINAL_TITLE=1` (both from `agents.json`).
 
-## Cross-CLI collaboration (research only, nothing built yet)
+## Delegate (Windows only)
+
+`windows/delegate.cmd <target> "<task>"` lets one agent hand work to another CLI. The target runs headless (one shot) in
+the same project folder and blocks until it finishes; its reply is printed and saved. Targets: `claude`, `codex`, `agy`
+(`gemini` is accepted as an alias of `agy`).
+
+- Options: `-Project <dir>`, `-Summary "<what has been done>"` (max 3000 chars), `-Files a,b`, `-Edit`, `-TimeoutSec 600`,
+  `-Allow <rule>`, `-AllowWide`, and `-History` (lists past delegations of the project).
+- Files live in `<project>\.tai\`: `task-<target>.md`, `reply-<target>.md`, a `running-<target>.lock` and
+  `history\delegations.jsonl` (runs older than 30 days or beyond the last 50 are pruned). Exit code: 0 done, 1 failed /
+  blocked / refused, 2 timed out. A delegate cannot delegate further.
+- Read-only by default. `-Edit` lets the target change files (use a worktree if the caller is editing too). Headless runs
+  can't ask for permission, so shell commands need `-Allow` in the target's own rule syntax (claude `Bash(npm test)`, agy
+  `command(npm test)`). Rules that allow almost everything (a bare tool, `*`, a shell or interpreter) are refused unless
+  `-AllowWide`. There are no skip-all-permissions flags. A blocked run reports what the target said, so you can see which
+  rule it needs.
+- Agents learn about it from a hint passed at launch through the `delegateHint` field in `agents.json` (claude, codex, agy);
+  you can just say "delegate this to codex" in a pane. The project's account is used for the target.
+- Linux and macOS have no delegate yet.
+
+## Cross-CLI collaboration (research; only the headless hand-off is built, see Delegate)
 
 Researched 2026-10-27; "doc" = read in official docs, "snippet" = search snippet only, "unverified" = third-party or conflicting.
 Check each flag with the CLI's `--help` before relying on it.

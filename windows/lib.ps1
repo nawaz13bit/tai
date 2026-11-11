@@ -732,6 +732,39 @@ function Get-AgentArgs($name, $mode, $projName) {
 # Extra flag that makes Claude read the dashboard's settings file (empty for the other CLIs).
 function Get-AgentSettingsFlag($name) { [string](Get-Registry).$name.settingsFlag }
 
+# Tells an agent about `tai delegate` through its own launch flag, as described by the registry's "delegateHint" field:
+#   { "flag": "--append-system-prompt-file", "file": true, "resumeArgs": ["--system-prompt-snapshot", "off"] }   (text from a file)
+#   { "flag": "-c", "value": "developer_instructions='{text}'" }                                                 (text inline)
+# CLIs without the field get nothing. The text is written to generated\delegate-hint.md on every launch (the target list
+# follows what is installed). Returns the extra launch arguments (empty when the agent has no field or no target).
+function Get-DelegateHintArgs($agent, $mode) {
+    $h = (Get-Registry).$agent.delegateHint
+    if (-not $h -or -not $h.flag) { return @() }
+    $targets = @($script:agents | Where-Object { $_ -ne $agent -and (Get-Registry).$_.headless -and (Test-AgentInstalled $_) })
+    if (-not $targets.Count) { return @() }
+    $ps1 = Join-Path $script:libRoot 'delegate.ps1'
+    $cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $ps1 + '" -Target <name> -Task "<task>"'
+    $text = 'tai delegate: when the user asks you to hand work to another agent CLI (for example "delegate to codex", "ask agy to review X", "summarise this chat and send file F to codex"), run in the project folder: ' + $cmd + ' [-Summary "<condensed chat context, max 3000 chars>"] [-Files path1,path2] [-Edit]. ' +
+        'It blocks until the target finishes and prints its reply, which you relay to the user. Targets: ' + ($targets -join ', ') + '. Read-only unless -Edit is given (the target may then change files). If it reports blocked, tell the user and offer -Allow <rule> for that command. Delegate only when asked; a delegate cannot delegate further.'
+    # For a flag that sends the text as a chat message (agy -i): ask for a one-word answer so it does not start working.
+    if ($h.suffix) { $text += ' ' + [string]$h.suffix }
+    try {
+        $dir = Join-Path $script:libRoot 'generated'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $file = Join-Path $dir "delegate-hint-$agent.md"   # one file per agent: panes launching at the same moment must not read each other's target list
+        Set-Content -LiteralPath $file -Value $text -Encoding UTF8
+    } catch { if ($h.file) { return @() } }
+    $out = @()
+    if ($h.file) { $out += [string]$h.flag; $out += $file }
+    else {
+        # One argument; PS 5.1 does not escape inner double quotes for native programs, so do it here.
+        $out += [string]$h.flag
+        $out += ([string]$h.value).Replace('{text}', $text).Replace('"', '\"')
+    }
+    if ($mode -eq 'resume') { foreach ($a in @($h.resumeArgs)) { if ($a) { $out += [string]$a } } }
+    return $out
+}
+
 function Set-AgentEnv($name) {
     $r = (Get-Registry).$name
     if ($r -and $r.env) { foreach ($p in $r.env.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [string]$p.Value, 'Process') } }

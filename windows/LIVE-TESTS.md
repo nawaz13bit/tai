@@ -77,3 +77,23 @@ Tick each box; note anything odd next to it.
 - [ ] Repo row is hidden for a non-git folder.
 - [ ] Linux/macOS (on a real machine): `S` opens a tmux window; arrows work (macOS: fractional `read -t`); empty session list shows no blank row.
 - [ ] Linux/macOS dashboards now match Windows: the `agents: N open ...` line, Codex effort + ctx rows (rollout log), Codex waiting-clear, agy `done` / stale-working-to-idle. macOS `codex_scan` (zsh glob `(.NOm[1,20])`, `=~` with `$match`) is unverified: check Codex ctx shows up.
+
+## 7. `tai delegate`, built 2026-11-07/08, Windows only (windows\delegate.ps1, delegate.cmd)
+Tested headless by hand (claude, codex, agy); not yet seen from a real pane.
+- [ ] By hand in a project folder: `windows\delegate.cmd codex "say ok"` prints the reply and `[tai delegate: codex done ...]`; `.tai\task-codex.md` and `.tai\reply-codex.md` exist; `.tai\history\` gets one file and a `delegations.jsonl` line. Same for `agy` and `claude`.
+- [ ] Read-only: ask a target to create a file; it must be refused or reported as blocked, no file appears. With `-Edit` the file is created and listed as changed.
+- [ ] A shell command the target needs (for example `npm test`) reports `blocked`; re-running with `-Allow` for that command works (rule syntax differs: claude `Bash(npm test)`, agy `command(npm test)`).
+- [ ] Too-wide `-Allow` (for example `Bash(*)`, `Bash`, `Bash(bash:*)`, `command(regex:.*)`) is refused with "-Allow rule too wide" and nothing runs; `-AllowWide` overrides it. Every run logs `allow` (the rules) and `wide` in `.tai\history\delegations.jsonl`.
+- [ ] `-Summary "..."` and `-Files a.txt,b.txt` show up as "Context..." and "Files to look at" lines in `task-<target>.md`.
+- [ ] Two delegations to the same target at once: the second is refused (lock). Exit codes: 0 done, 1 failed/blocked, 2 timed out (`-TimeoutSec 5` with a slow task).
+- [ ] Non-git project: `.tai\` is created, nothing breaks; git project: `.tai/` is added to `.git/info/exclude`.
+- [ ] Hint reaches the agents (restart tai first): in a Claude, a Codex and an agy pane type "delegate to <another CLI>: say ok". The agent runs delegate.ps1 and relays the reply. `windows\generated\delegate-hint-<agent>.md` exists per agent.
+- [ ] agy pane: the first thing in the chat is the hint message answered with just `ok` (no tool call, no approval prompt). Restarting the pane (resume) sends it again.
+- [ ] Claude pane after `--continue`: the hint still applies (`--system-prompt-snapshot off`).
+- [ ] "summarise this chat and send file X to codex": the agent fills `-Summary` and `-Files`.
+- [ ] Known limits: read-only is best effort (agy blocks writes by rule; claude plan mode; codex sandbox); claude permissions on a clean install are untested (without a global Bash allow, git commands may be blocked); a delegate cannot delegate further.
+
+## 8. Worktree key `W`, changed 2026-11-08 (restart tai first)
+- [ ] `W` with a new branch name: worktree `<project>-<branch>` is created and listed directly below the project, same CLI group.
+- [ ] `W` with a branch that already has a worktree (listed or not): that folder is reused, listed below the project; if it is already listed the cursor jumps to it ("already listed").
+- [ ] `W` with an existing branch that has no worktree: a worktree is created on that branch (no `-b`).

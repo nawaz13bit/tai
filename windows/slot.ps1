@@ -86,6 +86,8 @@ while ($true) {
     Push-Location -LiteralPath $job.path
     $env:TAI_PROJECT_DIR = $job.path
     $env:TAI_AGENT = $agent
+    # Where an agent finds `tai delegate` (hand a task to another agent CLI).
+    $env:TAI_DELEGATE = Join-Path $PSScriptRoot 'delegate.cmd'
     # Claude would retitle the window; the dashboard finds the focused pane by its "pane N" title.
     $env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE = '1'
     # Windows Terminal mangles Claude's incremental fullscreen repaints after a pane resize (scroll and wheel stop working); repaint fully instead.
@@ -115,13 +117,13 @@ while ($true) {
             Set-AgentAccountEnv $agent $account
             $exe = Get-AgentExe $agent
             $sflag = @(if (Get-AgentSettingsFlag $agent) { Get-AgentSettingsFlag $agent; $settings })
-            $argv = @(Get-AgentArgs $agent 'resume' $job.name) + $sflag
+            $argv = @(Get-AgentArgs $agent 'resume' $job.name) + $sflag + @(Get-DelegateHintArgs $agent 'resume')
             & $exe @argv
             # Nothing to continue (new project): the command fails fast, so start a fresh session.
             # Skipped when the dashboard closed it on purpose.
             if ($LASTEXITCODE -ne 0 -and $clock.Elapsed.TotalSeconds -lt 3 -and -not (Test-Path $closeFlag)) {
                 Write-Host 'No earlier conversation to continue (or it failed to load) - starting a new one.' -ForegroundColor Yellow
-                $argv = @(Get-AgentArgs $agent 'fresh' $job.name) + $sflag
+                $argv = @(Get-AgentArgs $agent 'fresh' $job.name) + $sflag + @(Get-DelegateHintArgs $agent 'fresh')
                 & $exe @argv
             }
             # The dashboard closed this project on purpose: no menu.
@@ -184,7 +186,7 @@ while ($true) {
         Remove-Item (Join-Path $stateDir ('hook_' + (Get-StateKey $job.path) + '.json*')) -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $stateDir ('subs_' + (Get-StateKey $job.path) + '.txt')) -Force -ErrorAction SilentlyContinue
         Clear-AgentEnv
-        Remove-Item Env:TAI_PROJECT_DIR, Env:TAI_AGENT, Env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE, Env:CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT -ErrorAction SilentlyContinue
+        Remove-Item Env:TAI_PROJECT_DIR, Env:TAI_AGENT, Env:TAI_DELEGATE,Env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE, Env:CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT -ErrorAction SilentlyContinue
     }
     # The dashboard closed this project with X and wants the pane gone too (never set for the last pane).
     # Exit ends a -NoExit host, so Windows Terminal closes the pane; the dashboard then fixes the layout.
