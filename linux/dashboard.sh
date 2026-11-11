@@ -676,9 +676,12 @@ find_flow() {
 }
 
 # Reads a key into KEY; returns 1 on the 1 s timeout so the list can refresh.
+PENDING_KEY=""
 read_key() {
     local k rest
-    IFS= read -rsn1 -t 1 k || return 1
+    # A key set aside by fold_arrows comes first.
+    if [[ -n "$PENDING_KEY" ]]; then KEY=$PENDING_KEY; PENDING_KEY=""; return 0; fi
+    IFS= read -rsn1 -t "${READ_T:-1}" k || return 1
     if [[ "$k" == $'\e' ]]; then
         IFS= read -rsn2 -t 0.05 rest
         case "$rest" in
@@ -689,6 +692,20 @@ read_key() {
         esac
     elif [[ -z "$k" ]]; then KEY=enter
     else KEY="$k"; fi
+}
+
+# Held Up/Down keys queue up: fold the ones already waiting into one move (STEPS) so the list is drawn once.
+# The first non-arrow key found is kept in PENDING_KEY for the next read_key.
+fold_arrows() {
+    STEPS=$1
+    while IFS= read -rsn1 -t 0 _ 2>/dev/null; do
+        READ_T=0.02 read_key || break
+        case "$KEY" in
+            up|k) STEPS=$((STEPS - 1)) ;;
+            down|j) STEPS=$((STEPS + 1)) ;;
+            *) PENDING_KEY=$KEY; break ;;
+        esac
+    done
 }
 
 # --- session restore: the open projects come back after a restart ----------------------------------------
@@ -754,8 +771,8 @@ while true; do
         n=${#order[@]}
         cur=-1; ((n)) && cur=${order[sel]}
         case "$KEY" in
-            up|k)   ((n)) && sel=$(((sel + n - 1) % n)) ;;
-            down|j) ((n)) && sel=$(((sel + 1) % n)) ;;
+            up|k)   if ((n)); then fold_arrows -1; sel=$((((sel + STEPS) % n + n) % n)); fi ;;
+            down|j) if ((n)); then fold_arrows 1; sel=$((((sel + STEPS) % n + n) % n)); fi ;;
             sup|sdown)   # reorder within the CLI group; the highlight follows the project
                 ((n)) || continue
                 if [[ "$KEY" == sup ]]; then to=$((sel - 1)); else to=$((sel + 1)); fi
