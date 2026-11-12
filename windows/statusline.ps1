@@ -24,9 +24,19 @@ if ($env:CLAUDE_CONFIG_DIR) {
     $acctSettings = Join-Path $env:CLAUDE_CONFIG_DIR 'settings.json'
     if (Test-Path $acctSettings) { $userSettings = $acctSettings }
 }
+# settings.json is parsed once and shared by the compaction and effort lookups below.
+$settingsObj = $null
+$settingsLoaded = $false
+function Get-UserSettings {
+    if (-not $script:settingsLoaded) {
+        $script:settingsLoaded = $true
+        try { $script:settingsObj = [IO.File]::ReadAllText($userSettings) | ConvertFrom-Json } catch { }
+    }
+    return $script:settingsObj
+}
 if ((Test-Path $userSettings) -and $window) {
     $acw = $null
-    try { $acw = (Get-Content $userSettings -Raw | ConvertFrom-Json).autoCompactWindow } catch { }
+    try { $acw = (Get-UserSettings).autoCompactWindow } catch { }
     if ($acw -is [int] -or $acw -is [long] -or $acw -is [double]) {
         $compactAt = [math]::Min(100, 100 * $acw / $window)
     }
@@ -37,7 +47,7 @@ foreach ($candidate in @($data.effort.level, $data.effort, $data.effort_level)) 
     if ($candidate -is [string] -and $candidate) { $effort = $candidate; break }
 }
 if (-not $effort -and (Test-Path $userSettings)) {
-    try { $effort = (Get-Content $userSettings -Raw | ConvertFrom-Json).effortLevel } catch { }
+    try { $effort = (Get-UserSettings).effortLevel } catch { }
 }
 $left = if ($null -ne $ctx) { [math]::Max(0, $compactAt - $ctx) } else { $null }
 $compact = if ($null -ne $left) { 'compact in ~{0:N0}%' -f $left } else { 'compact --' }
@@ -75,7 +85,20 @@ if ($data.rate_limits) {
     # A pane on another account (CLAUDE_CONFIG_DIR set by tai) writes its own file, so accounts don't overwrite each other.
     $usageName = 'usage.json'
     if ($env:CLAUDE_CONFIG_DIR) { $usageName = 'usage-' + ((Split-Path $env:CLAUDE_CONFIG_DIR.TrimEnd('/', '\') -Leaf).ToLower() -replace '[^a-z0-9]', '_') + '.json' }
-    try { Write-Atomic (Join-Path $PSScriptRoot $usageName) $usage } catch { }
+    # Skip the write when the limits are unchanged and the file was refreshed in the last 30 s: the status line runs
+    # after every message, but the numbers move rarely.
+    $usagePath = Join-Path $PSScriptRoot $usageName
+    $same = $false
+    try {
+        $fi = New-Object IO.FileInfo $usagePath
+        if ($fi.Exists -and ((Get-Date) - $fi.LastWriteTime).TotalSeconds -lt 30) {
+            $old = [IO.File]::ReadAllText($usagePath) | ConvertFrom-Json
+            $oldCore = [pscustomobject]@{ f = $old.five_hour; s = $old.seven_day } | ConvertTo-Json -Depth 5 -Compress
+            $newCore = [pscustomobject]@{ f = $data.rate_limits.five_hour; s = $data.rate_limits.seven_day } | ConvertTo-Json -Depth 5 -Compress
+            $same = ($oldCore -eq $newCore)
+        }
+    } catch { }
+    if (-not $same) { try { Write-Atomic $usagePath $usage } catch { } }
 }
 
 # Model and effort are shown in the dashboard's project pane, so the line is the folder, context and compaction.

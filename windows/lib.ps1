@@ -164,9 +164,15 @@ $script:paneOrder = @{
 # its longer side, as long as both halves stay at least $minCols x $minRows cells. The window
 # decides how many panes fit. Rectangles (x, y, w, h as fractions of the whole window) of each
 # place in the focus order are kept in state\rects.json; the dashboard is the left 20%.
-$script:maxPanes = 9
-$script:minCols = 55
-$script:minRows = 24
+# Tunable for big screens (e.g. 4K): TAI_MAX_PANES (default 9, up to 16), TAI_MIN_COLS (55), TAI_MIN_ROWS (24).
+function Get-TaiEnvInt($name, $default, $lo, $hi) {
+    $v = 0
+    if ([int]::TryParse([string][Environment]::GetEnvironmentVariable($name), [ref]$v) -and $v -ge $lo -and $v -le $hi) { return $v }
+    return $default
+}
+$script:maxPanes = Get-TaiEnvInt 'TAI_MAX_PANES' 9 1 16
+$script:minCols = Get-TaiEnvInt 'TAI_MIN_COLS' 55 20 400
+$script:minRows = Get-TaiEnvInt 'TAI_MIN_ROWS' 24 8 200
 $script:cells = $null   # (columns, rows) of the whole window; measured from the dashboard when null
 $script:firstRect = @(0.2, 0.0, 0.8, 1.0)
 

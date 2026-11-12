@@ -7,7 +7,7 @@ $stateDir = Join-Path $PSScriptRoot 'state'
 $usageFile = Join-Path $PSScriptRoot 'usage.json'
 $alive = Join-Path $stateDir 'dashboard.alive'
 Remove-Item (Join-Path $stateDir 'dashboard.launching') -Force -ErrorAction SilentlyContinue   # tai.ps1's start-up marker
-$maxSlots = 9
+$maxSlots = $script:maxPanes   # from lib.ps1 (TAI_MAX_PANES)
 # Icons built from code points so the script stays plain ASCII (PS 5.1 misreads UTF-8 without a BOM).
 $icon = @{
     hourly  = [string][char]0x23F1   # stopwatch
@@ -67,6 +67,7 @@ $script:codexStamp = [datetime]::MinValue
 $script:codexCtxByDir = @{}
 $script:codexMtByDir = @{}   # per project folder: last write of its newest rollout log (stands in for Claude's transcript)
 $script:codexByHome = @{}   # per CODEX_HOME folder: @{ stamp; usage; ctx; mt }
+$script:rolloutCache = @{}  # per rollout log: @{ stamp; cwdKey; ctx; lim } extracted values, reused while the file is unchanged
 # Usage and per-project context of one Codex home (default ~/.codex); each account's folder is scanned and cached separately.
 function Get-CodexUsage($codexHome) {
     if (-not $codexHome) { $codexHome = Join-Path $env:USERPROFILE '.codex' }
@@ -98,45 +99,55 @@ function Get-CodexUsage($codexHome) {
         $gotLimits = $false
         $script:codexUsage = $null
         foreach ($f in $files) {
-            $fs = [System.IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
-            try {
-                $len = [math]::Min($fs.Length, 400000)
-                [void]$fs.Seek(-$len, 'End')
-                $buf = New-Object byte[] $len
-                [void]$fs.Read($buf, 0, $len)
-                # The first line (session_meta) holds the project folder the session ran in.
-                $hlen = [int][math]::Min($fs.Length, 3000)
-                $hbuf = New-Object byte[] $hlen
-                [void]$fs.Seek(0, 'Begin')
-                [void]$fs.Read($hbuf, 0, $hlen)
-            } finally { $fs.Dispose() }
-            # Context per project folder: newest log wins (files are newest first).
-            $txt = [Text.Encoding]::UTF8.GetString($buf)
-            $cwd = [regex]::Match([Text.Encoding]::UTF8.GetString($hbuf), '"cwd":"((?:[^"\\]|\\.)*)"')
-            $c = [regex]::Matches($txt, '"last_token_usage":\{[^}]*?"total_tokens":(\d+)\},"model_context_window":(\d+)')
-            if ($cwd.Success) {
-                $mk = Get-NormPath ($cwd.Groups[1].Value -replace '\\\\', '\')
-                if (-not $mtByDir.ContainsKey($mk)) { $mtByDir[$mk] = $f.LastWriteTime }
-            }
-            if ($cwd.Success -and $c.Count -and [double]$c[$c.Count - 1].Groups[2].Value -gt 0) {
-                $key = Get-NormPath ($cwd.Groups[1].Value -replace '\\\\', '\')
-                if (-not $byDir.ContainsKey($key)) {
-                    $cg = $c[$c.Count - 1].Groups
-                    $byDir[$key] = [math]::Min(100, [math]::Round(100 * [double]$cg[1].Value / [double]$cg[2].Value))
+            # A rollout log that has not changed since the last scan gives the same answers: reuse what was extracted
+            # from it instead of reading its 400 KB tail and running the regexes again.
+            $rstamp = '{0}|{1}' -f $f.LastWriteTimeUtc.Ticks, $f.Length
+            $rc = $script:rolloutCache[$f.FullName]
+            if (-not $rc -or $rc.stamp -ne $rstamp) {
+                $fs = [System.IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+                try {
+                    $len = [math]::Min($fs.Length, 400000)
+                    [void]$fs.Seek(-$len, 'End')
+                    $buf = New-Object byte[] $len
+                    [void]$fs.Read($buf, 0, $len)
+                    # The first line (session_meta) holds the project folder the session ran in.
+                    $hlen = [int][math]::Min($fs.Length, 3000)
+                    $hbuf = New-Object byte[] $hlen
+                    [void]$fs.Seek(0, 'Begin')
+                    [void]$fs.Read($hbuf, 0, $hlen)
+                } finally { $fs.Dispose() }
+                $txt = [Text.Encoding]::UTF8.GetString($buf)
+                $cwd = [regex]::Match([Text.Encoding]::UTF8.GetString($hbuf), '"cwd":"((?:[^"\\]|\\.)*)"')
+                $c = [regex]::Matches($txt, '"last_token_usage":\{[^}]*?"total_tokens":(\d+)\},"model_context_window":(\d+)')
+                $rc = @{ stamp = $rstamp; cwdKey = $null; ctx = $null; lim = $null }
+                if ($cwd.Success) {
+                    $rc.cwdKey = Get-NormPath ($cwd.Groups[1].Value -replace '\\\\', '\')
+                    if ($c.Count -and [double]$c[$c.Count - 1].Groups[2].Value -gt 0) {
+                        $cg = $c[$c.Count - 1].Groups
+                        $rc.ctx = [math]::Min(100, [math]::Round(100 * [double]$cg[1].Value / [double]$cg[2].Value))
+                    }
                 }
+                $m = [regex]::Matches($txt, '"rate_limits":\{.*?"primary":\{"used_percent":([\d.]+),"window_minutes":(\d+),"resets_at":(\d+)\},"secondary":(?:null|\{"used_percent":([\d.]+),"window_minutes":(\d+),"resets_at":(\d+)\})')
+                if ($m.Count) {
+                    $lg = $m[$m.Count - 1].Groups
+                    $rc.lim = @{ v = @($null, $lg[1].Value, $lg[2].Value, $lg[3].Value, $lg[4].Value, $lg[5].Value, $lg[6].Value); hasSec = $lg[4].Success }
+                }
+                $script:rolloutCache[$f.FullName] = $rc
             }
+            # Context per project folder: newest log wins (files are newest first).
+            if ($rc.cwdKey -and -not $mtByDir.ContainsKey($rc.cwdKey)) { $mtByDir[$rc.cwdKey] = $f.LastWriteTime }
+            if ($rc.cwdKey -and $null -ne $rc.ctx -and -not $byDir.ContainsKey($rc.cwdKey)) { $byDir[$rc.cwdKey] = $rc.ctx }
             if ($script:codexUsage -and $gotLimits) { continue }
-            $m = [regex]::Matches($txt, '"rate_limits":\{.*?"primary":\{"used_percent":([\d.]+),"window_minutes":(\d+),"resets_at":(\d+)\},"secondary":(?:null|\{"used_percent":([\d.]+),"window_minutes":(\d+),"resets_at":(\d+)\})')
-            if ($m.Count) {
-                $l = $m[$m.Count - 1].Groups
+            if ($rc.lim) {
+                $l = $rc.lim.v
                 # A window whose reset time has passed describes an old period: don't show it as current.
                 $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                $hasSec = $l[4].Success
-                if ([long]$l[3].Value -lt $nowUnix -and (-not $hasSec -or [long]$l[6].Value -lt $nowUnix)) { continue }
+                $hasSec = $rc.lim.hasSec
+                if ([long]$l[3] -lt $nowUnix -and (-not $hasSec -or [long]$l[6] -lt $nowUnix)) { continue }
                 # Free plans have one 30-day window and no secondary; label each window by its length.
                 function WinLabel($min) { $min = [int]$min; if ($min -ge 1440) { '{0}d' -f [math]::Round($min / 1440) } else { '{0}h' -f [math]::Round($min / 60) } }
-                $wins = @([pscustomobject]@{ label = (WinLabel $l[2].Value); used_percentage = [double]$l[1].Value; resets_at = [long]$l[3].Value })
-                if ($hasSec) { $wins += [pscustomobject]@{ label = (WinLabel $l[5].Value); used_percentage = [double]$l[4].Value; resets_at = [long]$l[6].Value } }
+                $wins = @([pscustomobject]@{ label = (WinLabel $l[2]); used_percentage = [double]$l[1]; resets_at = [long]$l[3] })
+                if ($hasSec) { $wins += [pscustomobject]@{ label = (WinLabel $l[5]); used_percentage = [double]$l[4]; resets_at = [long]$l[6] } }
                 $script:codexUsage = $wins
                 $gotLimits = $true
             }
@@ -156,19 +167,26 @@ function Get-GitInfo($path, [switch]$Cached) {
     if ($Cached) { if ($c) { return $c.info } else { return $null } }
     if ($c -and ((Get-Date) - $c.time).TotalSeconds -lt 10) { return $c.info }
     $info = $null
-    $top = git -C $path rev-parse --show-toplevel 2>$null
-    if ($LASTEXITCODE -eq 0 -and $top) {
-        $branch = git -C $path branch --show-current 2>$null
-        if (-not $branch) { $branch = 'detached ' + (git -C $path rev-parse --short HEAD 2>$null) }
-        $gitDir = [string](git -C $path rev-parse --git-dir 2>$null)
+    # One rev-parse for toplevel + git dir, one status for branch, upstream distance and changes, one worktree list.
+    $rp = @(git -C $path rev-parse --show-toplevel --git-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $rp.Count -ge 2 -and $rp[0]) {
+        $top = [string]$rp[0]; $gitDir = [string]$rp[1]
         $count = 0
         foreach ($l in (git -C $path worktree list --porcelain 2>$null)) { if ($l -like 'worktree *') { $count++ } }
         $changed = 0; $new = 0
-        foreach ($l in (git --no-optional-locks -C $path status --porcelain 2>$null)) { if ($l.StartsWith('??')) { $new++ } else { $changed++ } }
-        # Commits not yet pushed / not yet pulled, against the upstream branch (null when none is set).
-        $ahead = $null; $behind = $null
-        $lr = [string](git -C $path rev-list --left-right --count '@{u}...HEAD' 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $lr) { $f = $lr.Trim() -split '\s+'; $behind = [int]$f[0]; $ahead = [int]$f[1] }
+        $branch = $null; $oid = ''; $ahead = $null; $behind = $null
+        foreach ($l in (git --no-optional-locks -C $path status --porcelain=v2 --branch 2>$null)) {
+            if ($l.StartsWith('# branch.head ')) { $branch = $l.Substring(14) }
+            elseif ($l.StartsWith('# branch.oid ')) { $oid = $l.Substring(13) }
+            elseif ($l.StartsWith('# branch.ab ')) {
+                # "+<ahead> -<behind>"; the line is absent when no upstream is set (both stay null).
+                $ab = $l.Substring(12) -split '\s+'
+                $ahead = [int]($ab[0].TrimStart('+')); $behind = [int]($ab[1].TrimStart('-'))
+            }
+            elseif ($l.StartsWith('? ')) { $new++ }
+            elseif ($l.Length -gt 0 -and $l[0] -ne '#') { $changed++ }
+        }
+        if (-not $branch -or $branch -eq '(detached)') { $branch = 'detached ' + $oid.Substring(0, [math]::Min(7, $oid.Length)) }
         $info = @{
             branch  = $branch
             tree    = Split-Path $top -Leaf
@@ -256,13 +274,50 @@ function Refresh-RepoInfo($projects) {
     }
 }
 
+# Parsed JSON of a state file, re-read only when its size or write time changed. $f is the FileInfo from a directory
+# listing. Throws on an unreadable file (mid-write), which callers already skip. Entries of deleted files are dropped.
+$script:jsonCache = @{}
+function Read-JsonCached($f) {
+    $stamp = '{0}|{1}' -f $f.LastWriteTimeUtc.Ticks, $f.Length
+    $c = $script:jsonCache[$f.FullName]
+    if ($c -and $c.stamp -eq $stamp) { return $c.obj }
+    $obj = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json
+    $script:jsonCache[$f.FullName] = @{ stamp = $stamp; obj = $obj }
+    return $obj
+}
+function Clear-JsonCacheOrphans {
+    foreach ($k in @($script:jsonCache.Keys)) { if (-not [IO.File]::Exists($k)) { $script:jsonCache.Remove($k) } }
+}
+
+# Housekeeping, run at start and then hourly: leftover temp files from writers that were killed mid-write (older than
+# an hour, so a write in progress is never touched), and per-project state of projects not used for a week
+# (status, hook and sub-agent files; they are recreated on the next activity). Slot, open_* and settings files stay.
+$script:lastSweep = [datetime]::MinValue
+function Clear-StaleState {
+    $now = Get-Date
+    foreach ($dir in @($stateDir, $PSScriptRoot)) {
+        foreach ($f in @(Get-ChildItem $dir -Filter '*.tmp' -File -ErrorAction SilentlyContinue)) {
+            if (($now - $f.LastWriteTime).TotalHours -ge 1) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    foreach ($f in @(Get-ChildItem $stateDir -File -ErrorAction SilentlyContinue)) {
+        if (($now - $f.LastWriteTime).TotalDays -lt 7) { continue }
+        $n = $f.Name
+        if ($n -like 'hook_*.json' -or $n -like 'subs_*.txt' -or ($n -match '_[0-9A-F]{8}\.json$' -and $n -notlike 'slot*' -and $n -notlike 'open_*')) {
+            Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Clear-JsonCacheOrphans
+    $script:lastSweep = $now
+}
+
 # Panes in use, keyed by normalized project path. Includes panes still starting up.
 function Get-Slots {
     $slots = @{}
     # A file can be mid-write or deleted between listing and reading; skip it and retry next refresh.
     foreach ($f in Get-ChildItem $stateDir -Filter 'slot*.json' -ErrorAction SilentlyContinue) {
         try {
-            $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $s = Read-JsonCached $f
             # Pane window closed without exiting Claude: its file is stale. (Files from older panes have no pid.)
             if ($s.pid -and -not (Test-SlotAlive $s.pid $s.since)) {
                 # The wrapper is gone; if it was killed from outside, its CLI is still running in the pane. Stop it.
@@ -274,7 +329,7 @@ function Get-Slots {
     }
     foreach ($f in Get-ChildItem $stateDir -Filter 'slot*.assign' -ErrorAction SilentlyContinue) {
         try {
-            $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $s = Read-JsonCached $f
             $n = [int]($f.BaseName -replace '\D', '')
             if ($slots.ContainsKey((Get-NormPath $s.path))) { continue }   # keep the running entry (has the pid)
             $slots[(Get-NormPath $s.path)] = [pscustomobject]@{ slot = $n; name = $s.name; path = $s.path; agent = $s.agent; since = (Get-Date).ToString('o') }
@@ -289,7 +344,7 @@ function Get-Statuses {
     foreach ($f in Get-ChildItem $stateDir -Filter '*.json' -ErrorAction SilentlyContinue) {
         if ($f.Name -like 'slot*' -or $f.Name -like 'hook_*') { continue }
         try {
-            $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $s = Read-JsonCached $f
             $statuses[(Get-NormPath $s.dir)] = $s
         } catch { continue }
     }
@@ -336,7 +391,7 @@ function Get-AgentCounts($slots, $statuses, $hooks, $projects) {
         $state = 'idle'
         $mtime = $null
         if ($st -and (ToDate $st.updated) -ge $since) {
-            if ($st.transcript -and (Test-Path $st.transcript)) { $mtime = (Get-Item $st.transcript).LastWriteTime }
+            if ($st.transcript) { try { $tmt = [IO.File]::GetLastWriteTime([string]$st.transcript); if ($tmt.Year -gt 1700) { $mtime = $tmt } } catch { } }   # a missing file reads as year 1601
             if ($mtime -and ((Get-Date) - $mtime).TotalSeconds -lt $busySeconds) { $state = 'working' }
             if ($agent -ne 'claude' -and $st.agent -eq $agent -and $st.activity) {
                 $state = switch (Get-EffActivity $st) { 'working' { 'working' } 'waiting' { 'waiting' } default { 'idle' } }
@@ -367,7 +422,7 @@ function Get-Hooks {
     $hooks = @{}
     foreach ($f in Get-ChildItem $stateDir -Filter 'hook_*.json' -ErrorAction SilentlyContinue) {
         try {
-            $h = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $h = Read-JsonCached $f
             $hooks[(Get-NormPath $h.dir)] = $h
         } catch { continue }
     }
@@ -394,9 +449,9 @@ function Send-Toast($title, $text) {
 $script:toastOff = Join-Path $stateDir 'toast.off'
 $script:notified = @{}
 $script:notifySeeded = $false
-function Notify-Waiting($projects) {
-    $slots = Get-Slots
-    $hooks = Get-Hooks
+function Notify-Waiting($projects, $slots, $hooks) {
+    if (-not $slots) { $slots = Get-Slots }
+    if (-not $hooks) { $hooks = Get-Hooks }
     foreach ($p in $projects) {
         $key = Get-NormPath $p.path
         $slot = $slots[$key]; $hk = $hooks[$key]
@@ -412,11 +467,21 @@ function Notify-Waiting($projects) {
 
 # Running `tai delegate` hand-offs of a project: delegate.ps1 keeps <project>\.tai\running-<target>.lock (pid + start time)
 # while the target works. A lock whose process is gone, or that is older than 2 hours, is ignored. Text like "codex 0:42".
+$script:delegCache = @{}
 function Get-DelegationText($path) {
+    # The directory listing, lock reads and process lookups are cached for 3 s per project (the timer text moves with the draw tick).
+    $ck = Get-NormPath $path
+    $dc = $script:delegCache[$ck]
+    if ($dc -and ((Get-Date) - $dc.stamp).TotalSeconds -lt 3) { return $dc.text }
+    $text = Get-DelegationTextRaw $path
+    $script:delegCache[$ck] = @{ stamp = Get-Date; text = $text }
+    return $text
+}
+function Get-DelegationTextRaw($path) {
     $out = @()
     try {
         $dir = Join-Path $path '.tai'
-        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return '' }
+        if (-not [IO.Directory]::Exists($dir)) { return '' }
         foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'running-*.lock' -File -ErrorAction SilentlyContinue)) {
             $l = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
             if (-not $l.pid -or -not (Get-Process -Id ([int]$l.pid) -ErrorAction SilentlyContinue)) { continue }
@@ -435,14 +500,16 @@ function Get-DelegationText($path) {
 function Get-SubCount($project, $slot) {
     if (-not $slot) { return 0 }
     $file = Join-Path $stateDir ('subs_' + (Get-StateKey $project.path) + '.txt')
-    if (-not (Test-Path $file)) { return 0 }
+    if (-not [IO.File]::Exists($file)) { return 0 }
     $n = 0
     try {
-        foreach ($line in Get-Content $file -ErrorAction Stop) {
+        $since = ToDate $slot.since
+        $now = Get-Date
+        foreach ($line in [IO.File]::ReadAllLines($file)) {
             $f = $line -split "`t"
             if ($f.Count -lt 3) { continue }
             $t = ToDate $f[2]
-            if ($t -ge (ToDate $slot.since) -and ((Get-Date) - $t).TotalMinutes -lt 30) { $n++ }
+            if ($t -ge $since -and ($now - $t).TotalMinutes -lt 30) { $n++ }
         }
     } catch { }
     return $n
@@ -456,28 +523,43 @@ $script:shellStamp = [datetime]::MinValue
 
 # Ids of the shells under the CLI processes $roots: direct children, plus children of the CLI's non-shell
 # helpers (node wrappers). Shells running statusline.ps1 / hook.ps1 are left out.
-function Get-ShellPids($all, $roots) {
+function Get-ShellPids($kids, $roots) {
+    # $kids: parent pid -> its child process records (built once per snapshot), so each lookup is direct.
     $cliIds = @($roots)
-    $cliIds += @($all | Where-Object { $cliIds -contains $_.ParentProcessId -and $_.Name -notmatch '^(bash|powershell|pwsh|conhost)\.exe$' } | ForEach-Object { $_.ProcessId })
-    return @($all | Where-Object {
-        $cliIds -contains $_.ParentProcessId -and
-        $_.Name -match '^(bash|powershell|pwsh)\.exe$' -and
-        $_.CommandLine -notmatch 'statusline\.ps1|hook\.ps1'
-    } | ForEach-Object { $_.ProcessId })
+    foreach ($r in @($roots)) {
+        foreach ($k in $kids[[int]$r]) { if ($k.Name -notmatch '^(bash|powershell|pwsh|conhost)\.exe$') { $cliIds += [int]$k.ProcessId } }
+    }
+    $ids = @()
+    foreach ($c in $cliIds) {
+        foreach ($k in $kids[[int]$c]) {
+            if ($k.Name -match '^(bash|powershell|pwsh)\.exe$' -and $k.CommandLine -notmatch 'statusline\.ps1|hook\.ps1') { $ids += $k.ProcessId }
+        }
+    }
+    return $ids
 }
 function Get-ShellCounts($slots) {
     # A redraw caused by a keypress never waits for the slow snapshot; the next timed redraw refreshes it.
-    if ($script:keyRedraw -or ((Get-Date) - $script:shellStamp).TotalSeconds -lt 6) { return $script:shellCache }
+    if ($script:keyRedraw -or ((Get-Date) - $script:shellStamp).TotalSeconds -lt 12) { return $script:shellCache }
+    # Nothing to count without a pane process: skip the snapshot entirely.
+    $withPid = @($slots.Values | Where-Object { $_.pid })
+    if (-not $withPid.Count) { $script:shellCache = @{}; $script:shellStamp = Get-Date; return $script:shellCache }
     $counts = @{}
     try {
         $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine -ErrorAction Stop)
-        foreach ($s in $slots.Values) {
-            if (-not $s.pid) { continue }
+        # Parent pid -> children, built once so the per-pane lookups below are direct.
+        $kids = @{}
+        foreach ($pr in $all) {
+            $pp = [int]$pr.ParentProcessId
+            if (-not $kids.ContainsKey($pp)) { $kids[$pp] = New-Object System.Collections.ArrayList }
+            [void]$kids[$pp].Add($pr)
+        }
+        foreach ($s in $withPid) {
             # Whatever CLI runs in the pane (claude, codex, agy) is a child of the slot's PowerShell; node-based
             # ones can have a wrapper process in between, so non-shell children of the CLI count as part of it too.
-            $roots = @($all | Where-Object { $_.ParentProcessId -eq $s.pid -and $_.Name -ne 'conhost.exe' } | ForEach-Object { $_.ProcessId })
+            $roots = @()
+            foreach ($k in $kids[[int]$s.pid]) { if ($k.Name -ne 'conhost.exe') { $roots += [int]$k.ProcessId } }
             $ids = @{}
-            foreach ($id in (Get-ShellPids $all $roots)) { $ids[[int]$id] = 1 }
+            foreach ($id in (Get-ShellPids $kids $roots)) { $ids[[int]$id] = 1 }
             $counts[[int]$s.slot] = $ids
         }
         # Sessions hosted by Claude's background daemon run outside the pane's process tree. hook.ps1 maps each
@@ -498,7 +580,7 @@ function Get-ShellCounts($slots) {
                 $sid = $f[0]
                 $sess = @($all | Where-Object { $_.Name -eq 'claude.exe' -and $_.CommandLine -match '--session-id' -and $_.CommandLine -like "*$sid*" -and $_.CommandLine -notmatch '--bg-pty-host' })
                 if (-not $sess.Count) { continue }
-                foreach ($id in (Get-ShellPids $all @($sess | ForEach-Object { $_.ProcessId }))) { $counts[$bySlot[$best]][[int]$id] = 1 }
+                foreach ($id in (Get-ShellPids $kids @($sess | ForEach-Object { $_.ProcessId }))) { $counts[$bySlot[$best]][[int]$id] = 1 }
             }
         }
         foreach ($k in @($counts.Keys)) { $counts[$k] = $counts[$k].Count }
@@ -573,13 +655,28 @@ function Close-Project($project, $slots) {
 }
 
 # Projects grouped by agent (claude, codex, agy) so each agent's info sits together; list order within a group is kept.
+$script:sortedCache = $null
 function Get-SortedProjects {
+    # projects.json is re-read and re-sorted only when the file changed (size / write time).
+    $stamp = $null
+    try { $fi = New-Object IO.FileInfo $script:configPath; if ($fi.Exists) { $stamp = '{0}|{1}' -f $fi.LastWriteTimeUtc.Ticks, $fi.Length } } catch { }
+    if ($stamp -and $script:sortedCache -and $script:sortedCache.stamp -eq $stamp) { return $script:sortedCache.list }
+    $list = @(Get-SortedProjectsRaw)
+    if ($stamp) { $script:sortedCache = @{ stamp = $stamp; list = $list } }
+    return $list
+}
+function Get-SortedProjectsRaw {
     $all = @(Get-Projects)
-    $keyed = @()
-    for ($i = 0; $i -lt $all.Count; $i++) {
-        $keyed += [pscustomobject]@{ p = $all[$i]; a = [array]::IndexOf($script:agents, (Get-Agent $all[$i])); i = $i }
+    # Bucket by agent rank, keeping list order inside a bucket (replaces a repeated array += and a sort).
+    $buckets = @{}
+    foreach ($p in $all) {
+        $a = [array]::IndexOf($script:agents, (Get-Agent $p))
+        if (-not $buckets.ContainsKey($a)) { $buckets[$a] = New-Object System.Collections.ArrayList }
+        [void]$buckets[$a].Add($p)
     }
-    @($keyed | Sort-Object a, i | ForEach-Object { $_.p })
+    $out = New-Object System.Collections.ArrayList
+    foreach ($a in ($buckets.Keys | Sort-Object)) { $out.AddRange($buckets[$a]) }
+    @($out)
 }
 
 # Shift+Up/Down: swap the project with its neighbour in the same agent group and save the new list order.
@@ -923,7 +1020,7 @@ function Draw($projects, $cursor, $message) {
             $state = 'starting'; $fg = 'Green'
             if ($st -and (ToDate $st.updated) -ge (ToDate $slot.since)) {
                 $mtime = $null
-                if ($st.transcript -and (Test-Path $st.transcript)) { $mtime = (Get-Item $st.transcript).LastWriteTime }
+                if ($st.transcript) { try { $tmt = [IO.File]::GetLastWriteTime([string]$st.transcript); if ($tmt.Year -gt 1700) { $mtime = $tmt } } catch { } }   # a missing file reads as year 1601
                 if ($mtime -and ((Get-Date) - $mtime).TotalSeconds -lt $busySeconds) { $state = 'working'; $fg = 'Yellow' }
                 elseif ($mtime) { $state = 'idle ' + (Age $mtime) }
                 else { $state = 'idle' }
@@ -1493,12 +1590,21 @@ while ($true) {
     $size = "$([Console]::WindowWidth)x$([Console]::WindowHeight)"
     if ($size -ne $lastSize) { $lastSize = $size; Clear-Host; $dirty = $true }
 
-    if ($dirty -or ((Get-Date) - $lastDraw).TotalSeconds -ge 2) {
+    if ($dirty -or ((Get-Date) - $lastDraw).TotalSeconds -ge 3) {
+        if (((Get-Date) - $script:lastSweep).TotalHours -ge 1) { try { Clear-StaleState } catch { $script:lastSweep = Get-Date } }
         $projects = @(Get-SortedProjects)
         if ($cursor -ge $projects.Count) { $cursor = [math]::Max(0, $projects.Count - 1) }
-        if (-not $script:keyRedraw) { try { Notify-Waiting $projects } catch { } }
-        try { Draw $projects $cursor $message }
+        $wasKeyRedraw = $script:keyRedraw
+        $drawn = $false
+        try { Draw $projects $cursor $message; $drawn = $true }
         catch { Start-Sleep -Milliseconds 200 }   # transient read error; next tick redraws
+        # Reuse the state Draw just read instead of listing and parsing every state file a second time.
+        if (-not $wasKeyRedraw) {
+            try {
+                $sn = $script:drawSnap
+                if ($drawn -and $sn) { Notify-Waiting $projects $sn.slots $sn.hooks } else { Notify-Waiting $projects }
+            } catch { }
+        }
         $script:keyRedraw = $false
         $lastDraw = Get-Date
         $dirty = $false
