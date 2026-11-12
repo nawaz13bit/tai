@@ -27,3 +27,6 @@ Desktop.ini
 /Microsoft/
 linux/generated/
 macos/generated/
+
+# Screenshot drafts (masked images kept locally until chosen for the README)
+docs/img/

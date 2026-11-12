@@ -25,6 +25,19 @@ Hook and status-line examples sit in both folders (`claude-settings`, `codex-hoo
 Each folder keeps its own runtime `state/`.
 Windows hook/statusline settings reference `windows/*.ps1` by absolute path; Linux ones reference `linux/*.sh`.
 
+**Big screens (Windows):** the layout is measured in character cells, so a 4K monitor fits more panes automatically.
+To go further, set `TAI_MAX_PANES` (default 9, up to 16), `TAI_MIN_COLS` (default 55) and `TAI_MIN_ROWS` (default 24)
+before launching, e.g. `$env:TAI_MAX_PANES = 12; $env:TAI_MIN_COLS = 70`.
+
+## Screenshots
+
+The dashboard on the left, then one pane per project opening in turn (Windows Terminal; pane text is illustrative).
+
+![Dashboard with one project open](docs/img/frame1_demo.png)
+![Two panes](docs/img/frame2_demo.png)
+![Three panes](docs/img/frame3_demo.png)
+![All panes](docs/img/frame4_demo.png)
+
 ## Quick start
 
 - **Windows** (PowerShell 5.1, Windows Terminal): copy `windows/projects.example.json` to `windows/projects.json` and
