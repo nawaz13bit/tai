@@ -221,7 +221,9 @@ function Get-GhStats($path, [switch]$NoStart) {
         $c.job = $null
         $c.time = Get-Date
         $f = if ($out.Count) { ([string]$out[0]).Split("`t") } else { @() }
-        $c.text = if ($f.Count -ge 4) { ('issues {0}  PRs {1}' -f $f[2], $f[3]) } else { 'no GitHub repo' }
+        if ($f.Count -ge 4) { $c.text = 'issues {0}  PRs {1}' -f $f[2], $f[3] }
+        elseif ($f.Count -eq 1 -and $f[0] -eq 'NOREPO') { $c.text = 'no GitHub repo' }
+        else { $c.time = (Get-Date).AddSeconds(-240) }   # a failed lookup (network, auth, load) retries in a minute and keeps the old text
     }
     # One lookup at a time, so many projects don't spawn many gh processes at once.
     $busy = $false
@@ -232,7 +234,12 @@ function Get-GhStats($path, [switch]$NoStart) {
             param($d)
             Set-Location -LiteralPath $d
             $nwo = gh repo view --json nameWithOwner --jq .nameWithOwner 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $nwo) { return }
+            if ($LASTEXITCODE -ne 0 -or -not $nwo) {
+                # Only a folder with no github.com remote is "no repo"; anything else is a failed lookup to retry.
+                $url = git remote get-url origin 2>$null
+                if (-not $url -or $url -notmatch 'github\.com') { 'NOREPO' }
+                return
+            }
             $owner, $name = $nwo.Split('/')
             $q = 'query($o:String!,$n:String!){repository(owner:$o,name:$n){stargazerCount forkCount issues(states:OPEN){totalCount} pullRequests(states:OPEN){totalCount}}}'
             gh api graphql -f query=$q -F o=$owner -F n=$name --jq '.data.repository | [.stargazerCount,.forkCount,.issues.totalCount,.pullRequests.totalCount] | @tsv' 2>$null
@@ -262,10 +269,15 @@ function Get-RepoLine($path) {
 function Refresh-RepoInfo($projects) {
     # Git runs only on idle redraws (not while a key is being handled) and at most every 10 s per project.
     if (-not $script:keyRedraw) {
+        # Never-loaded projects first, then the stalest one. Taking the first stale project in list order starved
+        # the later ones: the early projects went stale again (10 s) before a later one ever got its first lookup.
+        $pick = $null; $oldest = $null; $fresh = 0
         foreach ($p in $projects) {
             $c = $gitCache[(Get-NormPath $p.path)]
-            if (-not $c -or ((Get-Date) - $c.time).TotalSeconds -ge 10) { $null = Get-GitInfo $p.path; break }
+            if (-not $c) { $null = Get-GitInfo $p.path; $fresh++; if ($fresh -ge 3) { break }; continue }   # up to 3 first lookups per frame
+            if (((Get-Date) - $c.time).TotalSeconds -ge 10 -and (-not $oldest -or $c.time -lt $oldest)) { $oldest = $c.time; $pick = $p }
         }
+        if ($pick -and -not $fresh) { $null = Get-GitInfo $pick.path }
     }
     foreach ($p in $projects) {
         $c = $ghCache[(Get-NormPath $p.path)]

@@ -25,9 +25,10 @@ Hook and status-line examples sit in both folders (`claude-settings`, `codex-hoo
 Each folder keeps its own runtime `state/`.
 Windows hook/statusline settings reference `windows/*.ps1` by absolute path; Linux ones reference `linux/*.sh`.
 
-**Big screens (Windows):** the layout is measured in character cells, so a 4K monitor fits more panes automatically.
+**Big screens:** the layout is measured in character cells, so a 4K monitor fits more panes automatically.
 To go further, set `TAI_MAX_PANES` (default 9, up to 16), `TAI_MIN_COLS` (default 55) and `TAI_MIN_ROWS` (default 24)
-before launching, e.g. `$env:TAI_MAX_PANES = 12; $env:TAI_MIN_COLS = 70`.
+before launching, e.g. `$env:TAI_MAX_PANES = 12; $env:TAI_MIN_COLS = 70` on Windows, or
+`TAI_MAX_PANES=12 TAI_MIN_COLS=70 ./linux/tai` on Linux/macOS.
 
 ## Screenshots
 
@@ -37,6 +38,23 @@ The dashboard on the left, then one pane per project opening in turn (Windows Te
 ![Two panes](docs/img/frame2_demo.png)
 ![Three panes](docs/img/frame3_demo.png)
 ![All panes](docs/img/frame4_demo.png)
+
+## Prerequisites
+
+You need at least one supported agent CLI on your `PATH` (`claude`, `codex`, `agy`, `opencode`, `agent` for Cursor,
+`copilot` or `qwen`), already signed in. tai does not install or log in to them. Git is optional (it enables the repo row,
+diff and worktrees), and so is the GitHub CLI `gh` (issue and PR counts, push / PR).
+
+| | Needs | Install | Check |
+|---|---|---|---|
+| **Windows** | Windows 10/11, **Windows Terminal**, Windows PowerShell 5.1 (built in) | `winget install Microsoft.WindowsTerminal` | `wt.exe -v` |
+| **Linux** | bash 4+, tmux 3.0+, jq (`notify-send` optional, for toasts) | `sudo apt install tmux jq` (or your distro's equivalent) | `tmux -V; jq --version` |
+| **macOS** | zsh 5+ (built in), tmux 3.0+, jq | `brew install tmux jq` | `tmux -V; jq --version` |
+
+- The zip from a GitHub release may drop the executable bit, so run `chmod +x linux/*.sh linux/tai` (macOS:
+  `chmod +x macos/*.zsh macos/tai`) once.
+- Linux and macOS are experimental: they have only been syntax-checked, not run on a real machine. Windows is the tested one.
+- New here? Read Prerequisites above, then Quick start below.
 
 ## Quick start
 
@@ -55,7 +73,8 @@ The dashboard on the left, then one pane per project opening in turn (Windows Te
   instead: for the other CLIs (Codex, Qwen, ...), the first dashboard start writes ready-to-use copies of the other
   `windows/*.example.json` files to `windows/generated/` (git-ignored, path already filled in; delete one to
   regenerate); copy them into those CLIs' own configs. Then run
-  `windows/tai.cmd` (`windows/setup-profile.ps1` can add a `tai` command to your PowerShell profile).
+  `windows/tai.cmd` (`windows/setup-profile.ps1` can add a `tai` command to your PowerShell profile). Start it with
+  `tai.cmd`, not `tai.ps1`: the .cmd passes `-ExecutionPolicy Bypass`, so a locked-down PC doesn't block the scripts.
   The repo row is hidden for folders that aren't git repos.
 - **Linux**: install bash 4+, tmux 3+ and jq (`notify-send` optional, for toasts). Copy the hooks / status line from
   `linux/claude-settings.json`, `linux/codex-hooks.example.json` and `linux/agy-settings.example.json` into the CLIs'
@@ -129,9 +148,9 @@ config folder, so a pane on another account just gets `CLAUDE_CONFIG_DIR` / `COD
 - Qwen's `Stop` hook reports `context_usage`, so the dashboard shows a ctx value for Qwen.
 - Copilot starts with `--no-alt-screen` and opencode with `OPENCODE_DISABLE_TERMINAL_TITLE=1` (both from `agents.json`).
 
-## Delegate (Windows only)
+## Delegate
 
-`windows/delegate.cmd <target> "<task>"` lets one agent hand work to another CLI. The target runs headless (one shot) in
+`windows/delegate.cmd <target> "<task>"` (Windows options shown below) lets one agent hand work to another CLI. The target runs headless (one shot) in
 the same project folder and blocks until it finishes; its reply is printed and saved. Targets: `claude`, `codex`, `agy`
 (`gemini` is accepted as an alias of `agy`).
 
@@ -147,7 +166,8 @@ the same project folder and blocks until it finishes; its reply is printed and s
   rule it needs.
 - Agents learn about it from a hint passed at launch through the `delegateHint` field in `agents.json` (claude, codex, agy);
   you can just say "delegate this to codex" in a pane. The project's account is used for the target.
-- Linux and macOS have no delegate yet.
+- Linux: `linux/delegate.sh`, macOS: `macos/delegate.zsh` (same behaviour; options are `--project`, `--summary`, `--files`,
+  `--edit`, `--timeout`, `--allow`, `--allow-wide`, `--history`). Needs `jq`. Written but not run yet on those systems.
 
 ## Cross-CLI collaboration (research; only the headless hand-off is built, see Delegate)
 

@@ -18,7 +18,7 @@ sel=0 top=0 H=40 W=$DASH_COLS FULL=1 NEED_GATHER=0
 MSG="CLIs found: ${INSTALLED[*]}"
 names=() paths=() agents=() order=() prev=() USAGE=()
 declare -A SKEY P_pid P_since S_model S_eff S_ctx S_cmp S_quota S_act S_upd S_tr S_trm
-declare -A H_st H_upd SUBN SHN G G_t GH P_id P_ag S_aa CX_MT CX_CTX CX_EFF
+declare -A H_st H_upd SUBN DLG SHN G G_t GH P_id P_ag S_aa CX_MT CX_CTX CX_EFF
 now=0 last_ps=0 last_usage=0 ST_STAT=idle
 
 size() {
@@ -68,8 +68,20 @@ gather() {
              awk -F'\t' '$3 != ""')
 
     local -a sf=() hf=()
-    SUBN=()
+    SUBN=() DLG=()
+    local lk lt lpid lsince
     for p in "${!P_pid[@]}"; do
+        # tai delegate marker: a live .tai/running-<target>.lock (pid alive, younger than 2 h) -> "codex 1:15"
+        for lk in "$p"/.tai/running-*.lock; do
+            [[ -f "$lk" ]] || continue
+            lt="$(<"$lk")"
+            if [[ "$lt" =~ \"pid\":([0-9]+) ]]; then lpid=${BASH_REMATCH[1]}; else continue; fi
+            if [[ "$lt" =~ \"since\":([0-9]+) ]]; then lsince=${BASH_REMATCH[1]}; else continue; fi
+            kill -0 "$lpid" 2>/dev/null && ((now - lsince < 7200)) || continue
+            lt=${lk##*/running-}; lt=${lt%.lock}
+            DLG[$p]="$lt $(((now - lsince) / 60)):$(printf '%02d' $(((now - lsince) % 60)))"
+            break
+        done
         [[ -n "${SKEY[$p]:-}" ]] || SKEY[$p]="$(state_key "$p")"
         f="$STATE_DIR/${SKEY[$p]}.json";      [[ -f "$f" ]] && sf+=("$f")
         f="$STATE_DIR/hook_${SKEY[$p]}.json"; [[ -f "$f" ]] && hf+=("$f")
@@ -206,12 +218,17 @@ git_info() {
 }
 
 git_refresh_one() {
-    local idx p
+    local idx p t best="" bt=0
+    # Stalest first (never-loaded = 0). The first stale project in list order starved the later ones: the early
+    # ones went stale again before a later one got its first lookup.
     for idx in "${order[@]}"; do
         p=${paths[idx]}
         [[ -n "${P_pid[$p]:-}" ]] || continue
-        if ((now - ${G_t[$p]:-0} >= 10)); then git_info "$p"; return; fi
+        t=${G_t[$p]:-0}
+        if ((now - t >= 10)) && { [[ -z "$best" ]] || ((t < bt)); }; then best=$p; bt=$t; fi
     done
+    [[ -n "$best" ]] && git_info "$best"
+    return 0
 }
 
 # GitHub issue / PR counts, one project at a time every 5 minutes, in the background (needs gh).
@@ -491,6 +508,7 @@ render() {
             ((sh > 0)) && t+="▶ $sh sh  "
             ((sb > 0)) && t+="◈ $sb"
             [[ -n "$t" ]] && body+=("    $C_ACC$t$C_RST")
+            [[ -n "${DLG[$p]:-}" ]] && body+=("    $C_WORK⇄ ${DLG[$p]}$C_RST")
         fi
         if [[ -n "${P_pid[$p]:-}" || $oi -eq $sel ]] && [[ -n "${G[$p]:-}" ]]; then
             IFS='|' read -r br wt ch ah bh <<< "${G[$p]}"
@@ -533,7 +551,8 @@ render() {
            "$C_DIM P push/PR  W tree  S agents  / find$C_RST"
            "$C_DIM T toasts  U account  H hooks  M+arrow move  Q quit$C_RST"
            "$C_DIM◐ work  ! wait  ✓ done  ○ idle$C_RST"
-           "$C_DIM▶ shells  ◈ sub-agents  Alt+D$C_RST")
+           "$C_DIM▶ shells  ◈ sub-agents  ⇄ delegate$C_RST"
+           "$C_DIM Alt+D dashboard focus$C_RST")
     local room=$((H - 6))
     local -a use=("${USAGE[@]}")
     if ((n_open)); then   # one-line summary of all open agents

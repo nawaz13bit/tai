@@ -10,6 +10,7 @@ cd "$path" 2>/dev/null || { echo "Folder not found: $path"; sleep 4; exit 1; }  
 update_installed
 
 export TAI_PROJECT_DIR="$path"
+export TAI_DELEGATE="$TAI_DIR/delegate.sh"
 export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
 
 installed() { command -v "$(agent_exe "$1")" >/dev/null 2>&1; }
@@ -23,6 +24,8 @@ start_agent() {   # resume|fresh
     agent_env "$agent"
     set_agent_account_env "$agent" "$(project_account "$path" "$agent")"   # read each launch, so U + restart picks it up
     agent_args "$agent" "$1" "$name"   # fills ARGV from agents.json
+    delegate_hint_args "$agent" "$1"   # fills HINT: tells the agent about tai delegate (if its CLI supports it)
+    ARGV+=("${HINT[@]}")
     # Agents run slightly niced so the dashboard, tmux and the terminal stay responsive when the machine is busy
     # (raising the UI's own priority needs root). TAI_AGENT_NICE=0 turns it off; the default is 5.
     local n="${TAI_AGENT_NICE:-5}"

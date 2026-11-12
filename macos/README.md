@@ -38,4 +38,6 @@ Replace `/path/to/terminal_ai` with this checkout. Commands start with `zsh `, s
 - Accounts: copy `accounts.example.json` to `accounts.json` (see the main README). The usage file per account is
   `$TAI_CONF/usage-<folder>.json`; the login line needs `jq` and `claude auth status`.
 - Agents run niced (`TAI_AGENT_NICE`, default 5; 0 turns it off).
+- `delegate.zsh <target> "<task>"` hands a task to another CLI headless (see Delegate in the main README); a running one
+  shows as `⇄ codex 1:15` under the project. `TAI_MAX_PANES` / `TAI_MIN_COLS` / `TAI_MIN_ROWS` tune the layout on big screens.
 - Config lives in `~/.config/tai` (override with `TAI_CONF`); `agents.json` at the repo root is shared with the other ports.

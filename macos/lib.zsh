@@ -11,9 +11,14 @@ STATE_DIR="$TAI_CONF/state"
 USAGE_FILE="$TAI_CONF/usage.json"
 SESSION="${TAI_SESSION:-tai}"
 
-MIN_COLS=55          # a pane must stay at least this wide ...
-MIN_ROWS=24          # ... and this tall after a split
-MAX_PANES=9
+# Tunable for big screens (e.g. 4K): TAI_MAX_PANES (default 9, up to 16), TAI_MIN_COLS (55), TAI_MIN_ROWS (24).
+env_int() {   # name default min max -> the variable's value when it is an integer in range, else the default
+    local v="${(P)1:-}"
+    if [[ "$v" =~ '^[0-9]+$' ]] && (( v >= $3 && v <= $4 )); then print -r -- "$v"; else print -r -- "$2"; fi
+}
+MIN_COLS="$(env_int TAI_MIN_COLS 55 20 400)"    # a pane must stay at least this wide ...
+MIN_ROWS="$(env_int TAI_MIN_ROWS 24 8 200)"     # ... and this tall after a split
+MAX_PANES="$(env_int TAI_MAX_PANES 9 1 16)"
 DASH_COLS=38         # width of the dashboard pane
 REGISTRY="$TAI_DIR/../agents.json"   # per-CLI facts shared with windows/ and linux/ (exe, args, resume/fresh args, env)
 AGENTS=(claude codex agy opencode cursor copilot qwen)
@@ -34,6 +39,36 @@ agent_args() {   # agent mode(resume|fresh) project-name
     [[ -f "$REGISTRY" ]] || return 0
     ARGV=( ${(f)"$(jq -r --arg a "$1" --arg m "$2" --arg n "$3" \
         '.[$a] // {} | ((.args // []) + (.[$m] // []))[] | gsub("\\{name\\}"; $n)' "$REGISTRY")"} )
+}
+
+# Tells an agent about `tai delegate` through its own launch flag (registry field "delegateHint": flag, file, value, suffix,
+# resumeArgs). Fills HINT with extra launch arguments (empty when the CLI has no field or there is no target to hand work to).
+# The text is written to generated/delegate-hint-<agent>.md on every launch, because the target list follows what is installed.
+delegate_hint_args() {   # agent mode(resume|fresh)
+    HINT=()
+    [[ -f "$REGISTRY" ]] || return 0
+    local flag file value suffix a text f dir
+    local -a targets=()
+    flag="$(jq -r --arg a "$1" '.[$a].delegateHint.flag // empty' "$REGISTRY")"
+    [[ -n "$flag" ]] || return 0
+    file="$(jq -r --arg a "$1" '.[$a].delegateHint.file // false' "$REGISTRY")"
+    value="$(jq -r --arg a "$1" '.[$a].delegateHint.value // empty' "$REGISTRY")"
+    suffix="$(jq -r --arg a "$1" '.[$a].delegateHint.suffix // empty' "$REGISTRY")"
+    for a in "${AGENTS[@]}"; do
+        [[ "$a" != "$1" ]] && [[ "$(jq -r --arg a "$a" '.[$a].headless | type' "$REGISTRY")" == object ]] \
+            && command -v "$(agent_exe "$a")" >/dev/null 2>&1 && targets+=("$a")
+    done
+    (( ${#targets} )) || return 0
+    text='tai delegate: when the user asks you to hand work to another agent CLI (for example "delegate to codex", "ask agy to review X", "summarise this chat and send file F to codex"), run in the project folder: "'"$TAI_DIR/delegate.zsh"'" <name> "<task>" [--summary "<condensed chat context, max 3000 chars>"] [--files path1,path2] [--edit]. It blocks until the target finishes and prints its reply, which you relay to the user. Targets: '"${(j:, :)targets}"'. Read-only unless --edit is given (the target may then change files). If it reports blocked, tell the user and offer --allow <rule> for that command. Delegate only when asked; a delegate cannot delegate further.'
+    [[ -n "$suffix" ]] && text+=" $suffix"
+    dir="$TAI_DIR/generated"
+    mkdir -p "$dir" 2>/dev/null
+    f="$dir/delegate-hint-$1.md"   # one file per agent: panes launching together must not read each other's target list
+    if ! print -r -- "$text" | write_atomic "$f"; then [[ "$file" == true ]] && return 0; fi
+    if [[ "$file" == true ]]; then HINT=("$flag" "$f"); else HINT=("$flag" "${value//\{text\}/$text}"); fi
+    if [[ "$2" == resume ]]; then
+        while IFS= read -r a; do [[ -n "$a" ]] && HINT+=("$a"); done < <(jq -r --arg a "$1" '.[$a].delegateHint.resumeArgs // [] | .[]' "$REGISTRY")
+    fi
 }
 
 # Exports the agent's registry env vars (e.g. OPENCODE_DISABLE_TERMINAL_TITLE) and unsets the other agents'.
