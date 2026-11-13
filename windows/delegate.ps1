@@ -5,7 +5,7 @@
 #   delegate.cmd <target> "<task>" [-Project <dir>] [-Summary "<what has been done>"] [-Files a.txt,b.txt] [-Edit] [-TimeoutSec 600]
 #   delegate.cmd -History [-Project <dir>]       list past delegations of the project
 # Read-only by default; -Edit lets the target change files (use a worktree if the caller is editing too).
-# Exit code: 0 done, 1 failed or refused, 2 timed out.
+# Exit code: 0 done, 1 failed or refused, 2 timed out, 3 target out of quota (remembered until its reset; send the step elsewhere).
 param(
     [Parameter(Position = 0)][string]$Target,
     [Parameter(Position = 1)][string]$Task,
@@ -15,6 +15,8 @@ param(
     [string[]]$Allow,   # commands the target may run without asking, in the target's own rule syntax (claude: "Bash(git status)", agy: "command(git status)")
     [switch]$AllowWide,   # accept an -Allow rule that allows (almost) everything
     [switch]$Edit,
+    [switch]$IgnoreQuota,   # try a target even though an earlier run found it out of quota
+    [switch]$Worktree,   # run in a new git worktree (own branch, own .tai), so several delegations - even to the same target - can run in parallel without touching each other's files
     [int]$TimeoutSec = 600,
     [switch]$History
 )
@@ -73,6 +75,62 @@ if ($wide.Count -and -not $AllowWide) {
     Stop-Delegate ("-Allow rule too wide: " + ($wide -join ', ') + ". It would let the target run almost anything. Give the exact command (for example Bash(npm test)), or add -AllowWide if you really mean it.")
 }
 
+# ---- Quota memory: a target that ran out is skipped until its reset (machine-wide, so every project benefits) ------
+$quotaDir = Join-Path $script:libRoot 'generated'
+function Get-QuotaHold($t) {
+    $f = Join-Path $quotaDir "quota-$t.json"
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    try {
+        $until = [datetime](Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).until
+        if ($until -gt (Get-Date)) { return $until }
+    } catch { }
+    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    return $null
+}
+# Error text of the CLIs when the plan is used up (taken from user reports, not official docs; widen as new wordings show up).
+$quotaRx = "hit your (session|usage) limit|usage limit reached|usage_limit_reached|quota reached|RESOURCE_EXHAUSTED|Resource has been exhausted|rate limit(ed| reached| exceeded)|(HTTP|code|status)[ :]+429"
+# When the message says when it resets ("Try again at Apr 30th, 2026 11:21 AM", "Resets in 1h00m00s"), use that; otherwise 60 minutes.
+function Get-QuotaReset($text) {
+    $now = Get-Date
+    if ($text -match 'Resets? in\s+(?:(\d+)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?') {
+        $mins = 1440 * [int]('0' + $Matches[1]) + 60 * [int]('0' + $Matches[2]) + [int]('0' + $Matches[3])
+        if ($mins -gt 0) { return $now.AddMinutes($mins + 1) }
+    }
+    if ($text -match 'Try again at\s+([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})?,?\s*(\d{1,2}:\d{2}\s*[AP]M)?') {
+        $s = ("$($Matches[1]) $($Matches[2]) $($Matches[3])").Trim()
+        $d = [datetime]::MinValue
+        if ([datetime]::TryParse($s, [ref]$d) -and $d -gt $now -and $d -lt $now.AddDays(10)) { return $d }
+    }
+    return $now.AddMinutes(60)
+}
+if ($Target -and $Task -and -not $History) {
+    $q = $Target.ToLower(); if ($q -eq 'gemini') { $q = 'agy' }
+    if (-not $IgnoreQuota) {
+        $hold = Get-QuotaHold $q
+        if ($hold) {
+            [Console]::Error.WriteLine("tai delegate: quota - $q ran out earlier; skipped until $($hold.ToString('yyyy-MM-dd HH:mm')). Send this step to another target, or add -IgnoreQuota to try anyway.")
+            Write-Output "Delegation quota. $q is out of quota until about $($hold.ToString('yyyy-MM-dd HH:mm')). Send this step to another target."
+            exit 3
+        }
+    }
+}
+
+$origDir = $dir
+$wtNote = ''
+if ($Worktree -and -not $History -and $Target -and $Task) {
+    $tg = $Target.ToLower(); if ($tg -eq 'gemini') { $tg = 'agy' }
+    # Same checks as below, done first so a refused delegation leaves no worktree behind.
+    if (-not (Get-Registry).$tg.headless -or -not (Test-AgentInstalled $tg) -or $env:TAI_DELEGATE_DEPTH) { Stop-Delegate "'$tg' cannot be delegated to here (not headless, not installed, or depth limit)" }
+    $top = (& git -C $dir rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $top) { Stop-Delegate '-Worktree needs a git project' }
+    $stamp0 = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + (Get-Random -Maximum 1000)
+    $branch = "tai-$tg-$stamp0"
+    $wtDir = Join-Path (Split-Path $dir -Parent) ((Split-Path $dir -Leaf) + "-$branch")
+    $out = & git -C $dir worktree add -b $branch $wtDir 2>&1
+    if ($LASTEXITCODE -ne 0) { Stop-Delegate "could not create worktree: $out" }
+    $dir = (Resolve-Path -LiteralPath $wtDir).Path
+    $wtNote = "Worktree: $dir (branch $branch) - review it, then merge the branch or remove it with: git worktree remove `"$dir`""
+}
 $tai = Join-Path $dir '.tai'
 $histDir = Join-Path $tai 'history'
 $histLog = Join-Path $histDir 'delegations.jsonl'
@@ -106,7 +164,7 @@ if ($depth -ge 1) { Stop-Delegate 'a delegated agent cannot delegate again (dept
 
 New-Item -ItemType Directory -Force $histDir | Out-Null
 # A git project: keep .tai out of status locally without touching the project's .gitignore.
-$gitDir = Join-Path $dir '.git'
+$gitDir = Join-Path $origDir '.git'
 if (Test-Path -LiteralPath $gitDir -PathType Container) {
     try {
         $exDir = Join-Path $gitDir 'info'
@@ -170,7 +228,7 @@ try {
     # ---- Launch -----------------------------------------------------------------------------------------------
     Clear-AgentEnv
     Set-AgentEnv $Target
-    $proj = @(Get-Projects) | Where-Object { (Get-NormPath $_.path) -eq (Get-NormPath $dir) } | Select-Object -First 1
+    $proj = @(Get-Projects) | Where-Object { (Get-NormPath $_.path) -eq (Get-NormPath $origDir) } | Select-Object -First 1
     $account = if ($proj) { Get-ProjectAccount $proj $Target } else { '' }
     Set-AgentAccountEnv $Target $account
     $env:TAI_DELEGATE_DEPTH = [string]($depth + 1)
@@ -181,6 +239,16 @@ try {
     # Permissions the target cannot ask for in headless mode: pre-approved rules from -Allow (claude flag, agy per-run settings file).
     $extra = @()
     $rules = @(@($cfg.defaultAllow) + @($Allow) | Where-Object { $_ })   # defaultAllow: harmless read-only commands, so it works on machines without a broad allow rule
+    # agy only understands an exact command or "regex:..."; a glob like command(git status*) or command(git status:*) never matches, so turn globs into regex.
+    if ($cfg.settingsFlag) {
+        $rules = @($rules | ForEach-Object {
+            if ($_ -match '^(\w+)\((?!regex:)(.*)\)$' -and $Matches[2] -match '\*') {
+                $tool = $Matches[1]; $pat = $Matches[2] -replace ':\*$', ' *'
+                $re = (($pat -split '\*' | ForEach-Object { [regex]::Escape($_) }) -join '.*')
+                "$tool(regex:$re)"
+            } else { $_ }
+        })
+    }
     if ($cfg.allowFlag -and $rules.Count) { $extra += $cfg.allowFlag; $extra += ($rules -join ',') }
     if ($cfg.settingsFlag) {
         $deny = if ($Edit) { @() } else { @($cfg.readonlyDeny | Where-Object { $_ }) }
@@ -205,7 +273,19 @@ try {
         $proc.WaitForExit()
         $raw = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
         $body = $raw.Trim()
-        if ($proc.ExitCode -eq 0 -and $body -match 'matches a user-configured deny rule') {
+        $errText = if (Test-Path -LiteralPath $errFile) { [IO.File]::ReadAllText($errFile) } else { '' }
+        # Out of quota: the CLI failed, or answered with only a short limit message (a long real answer may merely mention quotas).
+        if (($proc.ExitCode -ne 0 -and ("$body`n$errText" -match $quotaRx)) -or ($body.Length -lt 400 -and $body -match $quotaRx) -or (-not $body -and $errText -match $quotaRx)) {
+            $status = 'quota'
+            $until = Get-QuotaReset "$body`n$errText"
+            try {
+                if (-not (Test-Path -LiteralPath $quotaDir)) { New-Item -ItemType Directory -Path $quotaDir -Force | Out-Null }
+                Write-Atomic (Join-Path $quotaDir "quota-$Target.json") ([pscustomobject]@{ until = $until.ToString('o') } | ConvertTo-Json)
+            } catch { }
+            $reason = "$Target is out of quota (skipped until about $($until.ToString('yyyy-MM-dd HH:mm'))). Send this step to another target. Target said: " + (Limit-Text (($body + ' ' + $errText).Trim()) 300)
+            $body = ''
+        }
+        elseif ($proc.ExitCode -eq 0 -and $body -match 'matches a user-configured deny rule') {
             $status = 'blocked'
             $reason = "$Target was refused by a deny rule (read-only mode blocks file writes). Re-run with -Edit if the task needs to change files."
         }
@@ -277,5 +357,6 @@ try {
 # ---- Back to the caller -----------------------------------------------------------------------------------------
 if ($status -eq 'done') { Write-Output (Limit-Text $body $maxReply) } else { Write-Output "Delegation $status. $reason" }
 if ($changedNames.Count) { Write-Output "Files changed: $($changedNames -join ', ')$more" }
+if ($wtNote) { Write-Output $wtNote }
 Write-Output "[tai delegate: $Target $status in ${seconds}s - reply saved to .tai/reply-$Target.md]"
-if ($status -eq 'done') { exit 0 } elseif ($status -eq 'timed out') { exit 2 } else { exit 1 }
+if ($status -eq 'done') { exit 0 } elseif ($status -eq 'timed out') { exit 2 } elseif ($status -eq 'quota') { exit 3 } else { exit 1 }

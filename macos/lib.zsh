@@ -47,8 +47,8 @@ agent_args() {   # agent mode(resume|fresh) project-name
 delegate_hint_args() {   # agent mode(resume|fresh)
     HINT=()
     [[ -f "$REGISTRY" ]] || return 0
-    local flag file value suffix a text f dir
-    local -a targets=()
+    local flag file value suffix a text f dir bf
+    local -a targets=() labels=()
     flag="$(jq -r --arg a "$1" '.[$a].delegateHint.flag // empty' "$REGISTRY")"
     [[ -n "$flag" ]] || return 0
     file="$(jq -r --arg a "$1" '.[$a].delegateHint.file // false' "$REGISTRY")"
@@ -59,7 +59,11 @@ delegate_hint_args() {   # agent mode(resume|fresh)
             && command -v "$(agent_exe "$a")" >/dev/null 2>&1 && targets+=("$a")
     done
     (( ${#targets} )) || return 0
-    text='tai delegate: when the user asks you to hand work to another agent CLI (for example "delegate to codex", "ask agy to review X", "summarise this chat and send file F to codex"), run in the project folder: "'"$TAI_DIR/delegate.zsh"'" <name> "<task>" [--summary "<condensed chat context, max 3000 chars>"] [--files path1,path2] [--edit]. It blocks until the target finishes and prints its reply, which you relay to the user. Targets: '"${(j:, :)targets}"'. Read-only unless --edit is given (the target may then change files). If it reports blocked, tell the user and offer --allow <rule> for that command. Delegate only when asked; a delegate cannot delegate further.'
+    for a in "${targets[@]}"; do
+        bf="$(jq -r --arg a "$a" '.[$a].bestFor // empty' "$REGISTRY")"
+        if [[ -n "$bf" ]]; then labels+=("$a (best for: $bf)"); else labels+=("$a"); fi
+    done
+    text='tai delegate: when the user asks you to hand work to another agent CLI (for example "delegate to codex", "ask agy to review X", "summarise this chat and send file F to codex"), run in the project folder: "'"$TAI_DIR/delegate.zsh"'" <name> "<task>" [--summary "<condensed chat context, max 3000 chars>"] [--files path1,path2] [--edit] [--worktree]. It blocks until the target finishes and prints its reply, which you relay to the user. Targets: '"${(j:; :)labels}"'. Read-only unless --edit is given (the target may then change files). If it reports blocked, tell the user and offer --allow <rule> for that command. Delegate only when asked; a delegate cannot delegate further. Auto-delegation: if the user asks you to delegate automatically or in parallel, split the job into steps, send each step to the target whose "best for" fits it, and start steps that do not depend on each other at the same time (separate background shell jobs or concurrent calls), then combine the replies. Only one delegation per target can run in a project at once, and two steps that edit files must not touch the same files; give edit steps to different targets or wait for the first to finish. Better: add --worktree to a step; it then runs in its own new git worktree and branch (made from the last commit, so uncommitted changes are not in it), which lets several delegations, even to the same target, run in parallel. The reply names the worktree and branch; review and merge them yourself. Quota: if a delegation ends with status quota (exit code 3), that target is out of quota and is skipped automatically until its reset; send that step to the next best target instead, tell the user which one was out, and never run it on your own quota unless the user agrees. For any other failure, report it rather than guessing.'
     [[ -n "$suffix" ]] && text+=" $suffix"
     dir="$TAI_DIR/generated"
     mkdir -p "$dir" 2>/dev/null

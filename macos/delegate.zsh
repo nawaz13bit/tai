@@ -3,13 +3,15 @@
 # The task goes in <project>/.tai/task-<target>.md, the answer comes back in <project>/.tai/reply-<target>.md (and on stdout).
 # Usage (from an agent's shell, or by hand):
 #   delegate.zsh <target> "<task>" [--project <dir>] [--summary "<what has been done>"] [--files a.txt,b.txt]
-#                                  [--allow "<rule>"]... [--allow-wide] [--edit] [--timeout 600]
+#                                  [--allow "<rule>"]... [--allow-wide] [--edit] [--worktree] [--ignore-quota] [--timeout 600]
 #   delegate.zsh --history [--project <dir>]       list past delegations of the project
 # (target gemini is accepted as an alias of agy.) Read-only by default; --edit lets the target change files
 # (use a worktree if the caller is editing too). --allow adds a command the target may run without asking, in the
 # target's own rule syntax (claude: "Bash(git status)", agy: "command(git status)"). A rule that allows (almost)
 # everything is refused unless --allow-wide is given.
-# Exit code: 0 done, 1 failed or refused, 2 timed out.
+# --worktree runs the target in a new git worktree (own branch, own .tai), so several delegations, even to the same
+# target, can run in parallel. Exit code: 0 done, 1 failed or refused, 2 timed out, 3 target out of quota (remembered
+# until its reset; send the step elsewhere, or --ignore-quota to try anyway).
 # (zsh has special variables named status, path, argv and history, so this script avoids those names.)
 . "${0:A:h}/lib.zsh"
 setopt extended_glob
@@ -24,7 +26,7 @@ limit_text() {   # text max
 
 trim() { local s="$1"; s="${s##[[:space:]]##}"; print -rn -- "${s%%[[:space:]]##}"; }
 
-target="" task="" proj="" summary="" allow_wide=0 edit=0 timeout_sec=600 do_hist=0
+target="" task="" proj="" summary="" allow_wide=0 edit=0 timeout_sec=600 do_hist=0 worktree=0 ignore_quota=0
 typeset -a files allow
 files=() allow=()
 npos=0
@@ -36,6 +38,8 @@ while (( $# )); do
         --allow)      allow+=("${2:-}"); shift ;;
         --allow-wide) allow_wide=1 ;;
         --edit)       edit=1 ;;
+        --worktree)   worktree=1 ;;
+        --ignore-quota) ignore_quota=1 ;;
         --timeout)    timeout_sec="${2:-600}"; shift ;;
         --history)    do_hist=1 ;;
         *)            if (( npos == 0 )); then target="$1"; elif (( npos == 1 )); then task="$1"; fi; npos=$((npos + 1)) ;;
@@ -47,6 +51,66 @@ done
 dir="${proj:-${TAI_PROJECT_DIR:-$PWD}}"
 [[ -d "$dir" ]] || stop "folder not found: $dir"
 dir="${dir:A}"
+
+# ---- Quota memory: a target that ran out is skipped until its reset (machine-wide, so every project benefits) ----
+quota_dir="$TAI_DIR/generated"
+quota_hold() {   # target -> prints the reset epoch when the target is still held
+    local f="$quota_dir/quota-$1.json" resume_at
+    [[ -f "$f" ]] || return 1
+    resume_at="$(jq -r '.until // empty' "$f" 2>/dev/null)"
+    if [[ "$resume_at" == <-> ]] && (( resume_at > EPOCHSECONDS )); then print -r -- "$resume_at"; return 0; fi
+    rm -f "$f"; return 1
+}
+# Error text of the CLIs when the plan is used up (taken from user reports, not official docs; widen as new wordings show up).
+quota_rx='hit your (session|usage) limit|usage limit reached|usage_limit_reached|quota reached|RESOURCE_EXHAUSTED|Resource has been exhausted|rate limit(ed| reached| exceeded)|(HTTP|code|status)[ :]+429'
+# When the message says when it resets ("Try again at Apr 30th, 2026 11:21 AM", "Resets in 1h00m00s"), use that; otherwise 60 minutes.
+quota_reset() {   # text -> epoch
+    local text="$1" now=$EPOCHSECONDS mins rest mon day yr tm ep
+    local rx_in='Resets? in[[:space:]]+([0-9]+d)?[[:space:]]*([0-9]+h)?[[:space:]]*([0-9]+m)?'
+    local rx_date='^[[:space:]]*([A-Za-z]{3,9})[[:space:]]+([0-9]{1,2})' rx_year='([0-9]{4})' rx_time='([0-9]{1,2}:[0-9]{2})[[:space:]]*([AaPp][Mm])'
+    if [[ "$text" =~ $rx_in ]]; then
+        mins=$(( 1440 * ${${match[1]%d}:-0} + 60 * ${${match[2]%h}:-0} + ${${match[3]%m}:-0} ))
+        (( mins > 0 )) && { print -r -- $(( now + (mins + 1) * 60 )); return; }
+    fi
+    if [[ "$text" == *'Try again at'* ]]; then
+        rest="${text#*Try again at}"
+        if [[ "$rest" =~ $rx_date ]]; then
+            mon="${${match[1]}[1,3]}"; day="${match[2]}"
+            yr="$(strftime %Y $now)"; [[ "$rest" =~ $rx_year ]] && yr="${match[1]}"
+            tm="12:00 AM"; [[ "$rest" =~ $rx_time ]] && tm="${match[1]} ${(U)match[2]}"
+            ep="$(date -j -f '%b %d %Y %I:%M %p' "$mon $day $yr $tm" +%s 2>/dev/null || date -d "$mon $day $yr $tm" +%s 2>/dev/null)"
+            if [[ "$ep" == <-> ]] && (( ep > now && ep < now + 864000 )); then print -r -- "$ep"; return; fi
+        fi
+    fi
+    print -r -- $(( now + 3600 ))
+}
+fmt_epoch() { strftime '%Y-%m-%d %H:%M' "$1"; }
+if (( ! do_hist )) && [[ -n "$target" && -n "$task" ]]; then
+    q="${(L)target}"; [[ "$q" == gemini ]] && q=agy
+    if (( ! ignore_quota )) && hold="$(quota_hold "$q")"; then
+        print -r -- "tai delegate: quota - $q ran out earlier; skipped until $(fmt_epoch "$hold"). Send this step to another target, or add --ignore-quota to try anyway." >&2
+        print -r -- "Delegation quota. $q is out of quota until about $(fmt_epoch "$hold"). Send this step to another target."
+        exit 3
+    fi
+fi
+
+# ---- Worktree: run in a new git worktree of the project (own branch, own .tai, therefore own lock) ----------------
+orig_dir="$dir" wt_note=""
+if (( worktree && ! do_hist )) && [[ -n "$target" && -n "$task" ]]; then
+    tg="${(L)target}"; [[ "$tg" == gemini ]] && tg=agy
+    # Same checks as below, done first so a refused delegation leaves no worktree behind.
+    command -v jq >/dev/null 2>&1 || stop "needs jq"
+    if [[ "$(jq -r --arg a "$tg" '.[$a].headless // empty | type' "$REGISTRY" 2>/dev/null)" != object ]] \
+        || ! command -v "$(agent_exe "$tg")" >/dev/null 2>&1 || [[ -n "${TAI_DELEGATE_DEPTH:-}" && "${TAI_DELEGATE_DEPTH}" != 0 ]]; then
+        stop "'$tg' cannot be delegated to here (not headless, not installed, or depth limit)"
+    fi
+    git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1 || stop "--worktree needs a git project"
+    branch="tai-$tg-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)-$RANDOM"
+    wt_dir="${dir:h}/${dir:t}-$branch"
+    wt_out="$(git -C "$dir" worktree add -b "$branch" "$wt_dir" 2>&1)" || stop "could not create worktree: $wt_out"
+    dir="${wt_dir:A}"
+    wt_note="Worktree: $dir (branch $branch) - review it, then merge the branch or remove it with: git worktree remove \"$dir\""
+fi
 tai="$dir/.tai"; hist_dir="$tai/history"; hist_log="$hist_dir/delegations.jsonl"
 
 # ---- History listing --------------------------------------------------------------------------------------------
@@ -100,9 +164,9 @@ harr() {   # array-name key-in-headless -> fills the named array with the regist
 
 mkdir -p "$hist_dir"
 # A git project: keep .tai out of status locally without touching the project's .gitignore.
-if [[ -d "$dir/.git" ]]; then
-    mkdir -p "$dir/.git/info"
-    grep -qxF '.tai/' "$dir/.git/info/exclude" 2>/dev/null || print -r -- '.tai/' >> "$dir/.git/info/exclude"
+if [[ -d "$orig_dir/.git" ]]; then   # the exclude file is shared with the project's worktrees
+    mkdir -p "$orig_dir/.git/info"
+    grep -qxF '.tai/' "$orig_dir/.git/info/exclude" 2>/dev/null || print -r -- '.tai/' >> "$orig_dir/.git/info/exclude"
 fi
 
 # One delegation per target at a time: a second one would overwrite the first one's files.
@@ -168,6 +232,22 @@ harr h_prompt prompt
 harr h_defallow defaultAllow; harr h_deny readonlyDeny
 rules=()
 for r in "${h_defallow[@]}" "${allow[@]}"; do [[ -n "$r" ]] && rules+=("$r"); done   # defaultAllow: harmless read-only commands
+if [[ -n "$settings_flag" ]]; then
+    # agy only understands an exact command or "regex:..."; a glob like command(git status*) never matches, so turn globs into regex.
+    conv=()
+    for r in "${rules[@]}"; do
+        if [[ "$r" == *'('*')' ]]; then
+            tool="${r%%\(*}"; inner="${r#*\(}"; inner="${inner%\)}"
+            if [[ "$inner" != regex:* && "$inner" == *'*'* ]]; then
+                inner="${inner/%:\*/ *}"
+                inner="$(printf '%s' "$inner" | sed -e 's/[][\\.^$|?+(){}]/\\&/g' -e 's/\*/.*/g')"
+                r="$tool(regex:$inner)"
+            fi
+        fi
+        conv+=("$r")
+    done
+    rules=("${conv[@]}")
+fi
 extra=()
 if [[ -n "$allow_flag" ]] && (( ${#rules} )); then extra+=("$allow_flag" "${(j:,:)rules}"); fi
 if [[ -n "$settings_flag" ]]; then
@@ -184,7 +264,7 @@ cmd_args=("${h_args[@]}" "${h_mode[@]}" "${extra[@]}" "${h_prompt[@]}" "$prompt"
 touch "$stamp_file"
 (
     agent_env "$target"
-    set_agent_account_env "$target" "$(project_account "$dir" "$target")"
+    set_agent_account_env "$target" "$(project_account "$orig_dir" "$target")"
     export TAI_DELEGATE_DEPTH=$((depth + 1)) TAI_PROJECT_DIR="$dir" TAI_AGENT="$target"
     cd "$dir" && exec "$exe" "${cmd_args[@]}"
 ) < /dev/null > "$out_file" 2> "$err_file" &   # empty stdin: a headless CLI must never wait for typing
@@ -199,7 +279,17 @@ if kill -0 "$bgpid" 2>/dev/null; then
 else
     wait "$bgpid"; code=$?
     body="$(trim "$(cat "$out_file" 2>/dev/null)")"
-    if (( code == 0 )) && [[ "$body" == *"matches a user-configured deny rule"* ]]; then
+    err_all="$(trim "$(cat "$err_file" 2>/dev/null)")"
+    # Out of quota: the CLI failed, or answered with only a short limit message (a long real answer may merely mention quotas).
+    if { (( code != 0 )) && [[ "$body"$'\n'"$err_all" =~ $quota_rx ]]; } || { (( ${#body} < 400 )) && [[ "$body" =~ $quota_rx ]]; } \
+        || { [[ -z "$body" ]] && [[ "$err_all" =~ $quota_rx ]]; }; then
+        st=quota
+        reset_ep="$(quota_reset "$body $err_all")"
+        mkdir -p "$quota_dir" 2>/dev/null
+        jq -nc --argjson u "$reset_ep" '{until: $u}' | write_atomic "$quota_dir/quota-$target.json"
+        reason="$target is out of quota (skipped until about $(fmt_epoch "$reset_ep")). Send this step to another target. Target said: $(limit_text "$(trim "$body $err_all")" 300)"
+        body=""
+    elif (( code == 0 )) && [[ "$body" == *"matches a user-configured deny rule"* ]]; then
         st=blocked
         reason="$target was refused by a deny rule (read-only mode blocks file writes). Re-run with --edit if the task needs to change files."
     elif (( code == 0 )) && [[ -n "$body" ]]; then
@@ -265,5 +355,6 @@ fi
 # ---- Back to the caller -----------------------------------------------------------------------------------------
 if [[ "$st" == done ]]; then limit_text "$body" "$MAX_REPLY"; print; else print -r -- "Delegation $st. $reason"; fi
 (( ${#changed_names} )) && print -r -- "$changed_line"
+[[ -n "$wt_note" ]] && print -r -- "$wt_note"
 print -r -- "[tai delegate: $target $st in ${seconds}s - reply saved to .tai/reply-$target.md]"
-case "$st" in done) exit 0 ;; "timed out") exit 2 ;; *) exit 1 ;; esac
+case "$st" in done) exit 0 ;; "timed out") exit 2 ;; quota) exit 3 ;; *) exit 1 ;; esac
